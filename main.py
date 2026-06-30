@@ -1,9 +1,10 @@
 # ============================================================
 # BOT TRADING V90.2 – HÍBRIDO DETERMINISTA (SIN IA)
 # ============================================================
-# - Velas de 1 hora, máximo 3 posiciones abiertas
-# - Análisis fundamental con cryptocurrency.cv (sentimiento)
-# - Análisis técnico: soporte/resistencia, EMA, patrones de velas
+# - Velas de 30 minutos, máximo 3 operaciones abiertas
+# - Reglas: soporte/resistencia, EMA, patrones de velas
+# - Filtro fundamental con cryptocurrency.cv (sentimiento gratuito)
+# - Heartbeat en Telegram cada 5 minutos con noticia y sentimiento
 # - Gráfico con fondo negro, flecha de entrada, todos los niveles
 # - Mensajes detallados por Telegram
 # ============================================================
@@ -35,11 +36,11 @@ logger = logging.getLogger(__name__)
 # CONFIGURACIÓN GENERAL
 # ============================================================
 SYMBOL = "BTCUSDT"
-INTERVAL = "60"                # 1 hora (Bybit usa "60" para 60 minutos)
+INTERVAL = "30"                # 30 minutos
 RISK_PER_TRADE = 0.0025        # 0.25% del balance por operación
 MAX_OPEN_TRADES = 3            # máximo 3 operaciones abiertas simultáneas
 LEVERAGE = 1
-SLEEP_SECONDS = 3600           # 1 hora (coincide con el intervalo)
+SLEEP_SECONDS = 300            # 5 minutos (heartbeat cada 5 min)
 
 # Gráficos
 GRAFICO_VELAS_LIMIT = 120
@@ -67,7 +68,6 @@ BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-# Ya no necesitamos ALPHA_VANTAGE_API_KEY
 
 if not BYBIT_API_KEY or not BYBIT_API_SECRET:
     raise Exception("❌ BYBIT_API_KEY o BYBIT_API_SECRET no configuradas")
@@ -261,60 +261,9 @@ def _detectar_tendencia(df, ventana=80):
     return slope, intercept, direccion
 
 # ============================================================
-# ANÁLISIS FUNDAMENTAL CON CRYPTOCURRENCY.CV (SIN API KEY)
+# MOTOR DE DECISIÓN V90 MEJORADO (con EMA y patrones)
 # ============================================================
-def obtener_sentimiento_fundamental(ticker="BTC"):
-    """
-    Obtiene el sentimiento de noticias desde cryptocurrency.cv
-    Retorna: (sentimiento_numérico, label, score)
-    sentimiento_numérico: 1=alcista, -1=bajista, 0=neutral
-    """
-    try:
-        url = f"https://cryptocurrency.cv/api/ai/sentiment?asset={ticker}"
-        r = requests.get(url, timeout=10)
-        if r.status_code != 200:
-            logger.warning(f"Error en cryptocurrency.cv: status {r.status_code}")
-            return 0, 'Neutral', 0.0
-
-        data = r.json()
-        label = data.get('label', 'Neutral')
-        score = data.get('score', 0.0)
-
-        if label == 'Bullish':
-            sent = 1
-        elif label == 'Bearish':
-            sent = -1
-        else:
-            sent = 0
-
-        logger.info(f"📰 Sentimiento fundamental {ticker}: {label} (score: {score:.2f})")
-        return sent, label, score
-    except Exception as e:
-        logger.error(f"Error al obtener sentimiento fundamental: {e}")
-        return 0, 'Neutral', 0.0
-
-def aplicar_filtro_fundamental(decision, estado):
-    """
-    Evalúa primero el sentimiento fundamental.
-    - Si es bajista y decisión es Buy → bloquea.
-    - Si es alcista y decisión es Sell → bloquea.
-    Retorna (permitido, motivo, sentimiento_numérico)
-    """
-    sent, label, score = obtener_sentimiento_fundamental("BTC")
-    if sent == -1 and decision == 'Buy':
-        return False, f"Noticias bajistas ({label}, score={score:.2f}) → bloqueo LONG", sent
-    if sent == 1 and decision == 'Sell':
-        return False, f"Noticias alcistas ({label}, score={score:.2f}) → bloqueo SHORT", sent
-    return True, f"Sentimiento fundamental permitido ({label}, score={score:.2f})", sent
-
-# ============================================================
-# MOTOR DE DECISIÓN TÉCNICO (V90 mejorado)
-# ============================================================
-def motor_v90_tecnico(estado):
-    """
-    Evalúa señales técnicas (soporte/resistencia, EMA, patrones)
-    Retorna: (decision, soporte, resistencia, razones)
-    """
+def motor_v90(estado):
     precio = estado['precio']
     soporte = estado['soporte']
     resistencia = estado['resistencia']
@@ -323,6 +272,7 @@ def motor_v90_tecnico(estado):
     ema20 = estado['ema20']
     ema_nivel = estado['ema_nivel']
     patron = estado['patron']
+
     razones = []
 
     # ---- Regla 1: Soporte + tendencia alcista ----
@@ -341,7 +291,7 @@ def motor_v90_tecnico(estado):
             razones.append(f"Patrón de vela: {patron}")
         return 'Sell', soporte, resistencia, razones
 
-    # ---- Regla 3: EMA como resistencia (precio toca EMA desde abajo) ----
+    # ---- Regla 3: EMA como resistencia (precio toca EMA desde abajo y no la rompe) ----
     if ema_nivel == 'resistencia' and abs(precio - ema20) < atr * 0.5 and tendencia != '📈 ALCISTA':
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde abajo (EMA actúa como resistencia)")
         razones.append("Sin ruptura al alza")
@@ -349,7 +299,7 @@ def motor_v90_tecnico(estado):
             razones.append(f"Patrón de vela: {patron}")
         return 'Sell', soporte, resistencia, razones
 
-    # ---- Regla 4: EMA como soporte (precio toca EMA desde arriba) ----
+    # ---- Regla 4: EMA como soporte (precio toca EMA desde arriba y no la rompe) ----
     if ema_nivel == 'soporte' and abs(precio - ema20) < atr * 0.5 and tendencia != '📉 BAJISTA':
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde arriba (EMA actúa como soporte)")
         razones.append("Sin ruptura a la baja")
@@ -358,25 +308,69 @@ def motor_v90_tecnico(estado):
         return 'Buy', soporte, resistencia, razones
 
     # ---- Regla 5: Ruptura de EMA ----
-    # Si precio cruza EMA al alza y vela alcista -> comprar
     if estado['close'] > ema20 and estado['open'] < ema20 and estado['close'] > estado['open']:
         razones.append(f"Ruptura alcista de EMA20 ({ema20:.2f})")
         razones.append(f"Patrón de vela: {patron}")
         return 'Buy', soporte, resistencia, razones
 
-    # Si precio cruza EMA a la baja y vela bajista -> vender
     if estado['close'] < ema20 and estado['open'] > ema20 and estado['close'] < estado['open']:
         razones.append(f"Ruptura bajista de EMA20 ({ema20:.2f})")
         razones.append(f"Patrón de vela: {patron}")
         return 'Sell', soporte, resistencia, razones
 
-    razones.append("Sin confluencia técnica válida")
+    razones.append("Sin confluencia válida")
     return None, soporte, resistencia, razones
+
+# ============================================================
+# FILTRO FUNDAMENTAL CON cryptocurrency.cv (sin API key)
+# ============================================================
+def obtener_noticias_y_sentimiento(ticker="BTC"):
+    """
+    Obtiene la última noticia y el sentimiento global desde cryptocurrency.cv.
+    Retorna: (titulo_noticia, sentimiento_label, sentimiento_score, source)
+    """
+    try:
+        # 1. Obtener última noticia
+        url_news = f"https://cryptocurrency.cv/api/news?ticker={ticker}&limit=1"
+        r_news = requests.get(url_news, timeout=10)
+        data_news = r_news.json()
+        if data_news and isinstance(data_news, list) and len(data_news) > 0:
+            noticia = data_news[0]
+            titulo = noticia.get('title', 'Sin título')
+            fuente = noticia.get('source', 'Desconocida')
+        else:
+            titulo = "No hay noticias recientes"
+            fuente = ""
+
+        # 2. Obtener sentimiento
+        url_sent = f"https://cryptocurrency.cv/api/ai/sentiment?asset={ticker}"
+        r_sent = requests.get(url_sent, timeout=10)
+        data_sent = r_sent.json()
+        label = data_sent.get('label', 'Neutral')
+        score = data_sent.get('score', 0.0)
+
+        logger.info(f"📰 Última noticia: {titulo} | Sentimiento: {label} ({score:.2f})")
+        return titulo, label, score, fuente
+
+    except Exception as e:
+        logger.error(f"Error al obtener noticias/sentimiento: {e}")
+        return "Error al obtener noticias", "Neutral", 0.0, ""
+
+def filtrar_por_fundamental(decision, sentimiento_label):
+    """
+    Aplica filtro fundamental basado en el sentimiento de noticias.
+    Retorna (permitido, motivo).
+    """
+    if sentimiento_label == 'Bearish' and decision == 'Buy':
+        return False, f"Noticias bajistas → bloqueo LONG"
+    if sentimiento_label == 'Bullish' and decision == 'Sell':
+        return False, f"Noticias alcistas → bloqueo SHORT"
+    return True, f"Sentimiento permitido ({sentimiento_label})"
 
 # ============================================================
 # GRÁFICO DE VELAS JAPONESAS CON FONDO NEGRO Y FLECHA
 # ============================================================
-def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept, razones, estado, sentimiento_fund):
+def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept, razones, estado):
     try:
         plt.style.use('dark_background')
         df_plot = df.copy().tail(GRAFICO_VELAS_LIMIT)
@@ -426,7 +420,6 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         if decision == 'Buy':
             ax.scatter(entrada_x, entrada_precio, s=250, marker='^', color='lime',
                        edgecolors='black', linewidths=2, label='Entrada BUY', zorder=5)
-            # Flecha
             ax.annotate('', xy=(entrada_x, entrada_precio), xytext=(entrada_x-2, entrada_precio-0.5*estado['atr']),
                         arrowprops=dict(arrowstyle='->', color='lime', lw=3))
         elif decision == 'Sell':
@@ -442,10 +435,9 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
             f"Hora: {times[-1].strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
             f"Soporte: {soporte:.2f}  Resistencia: {resistencia:.2f}\n"
             f"EMA20: {estado['ema20']:.2f}  ATR: {estado['atr']:.2f}\n"
-            f"Tendencia técnica: {estado['tendencia']}\n"
+            f"Tendencia: {estado['tendencia']}\n"
             f"Patrón: {estado['patron']}\n"
-            f"Sentimiento fundamental: {sentimiento_fund['label']} (score: {sentimiento_fund['score']:.2f})\n"
-            f"Razones técnicas: {', '.join(razones)}"
+            f"Razones: {', '.join(razones)}"
         )
         ax.text(0.02, 0.98, texto, transform=ax.transAxes,
                 fontsize=9, verticalalignment='top', color='white',
@@ -469,7 +461,7 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
 # ============================================================
 # PAPER TRADING – ABRIR Y CERRAR POSICIONES
 # ============================================================
-def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, tiempo, estado, sentimiento_fund):
+def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, tiempo, estado):
     global PAPER_BALANCE, PAPER_BALANCE_MAX, PAPER_MAX_DRAWDOWN, OPEN_POSITIONS
 
     if len(OPEN_POSITIONS) >= MAX_OPEN_TRADES:
@@ -502,8 +494,7 @@ def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, t
         'size_usd': size_usd,
         'razones': razones,
         'timestamp': tiempo,
-        'estado_entrada': estado.copy(),
-        'sentimiento_fund': sentimiento_fund.copy()
+        'estado_entrada': estado.copy()
     }
     OPEN_POSITIONS.append(posicion)
     logger.info(f"📌 Posición abierta: {decision} a {precio:.2f} (SL={sl:.2f}, TP={tp:.2f})")
@@ -542,7 +533,6 @@ def paper_revisar_posiciones(precio_actual, df):
         if cerrar:
             posiciones_a_cerrar.append((i, pos, pnl, motivo))
 
-    # Cerrar de atrás hacia adelante
     for i, pos, pnl, motivo in reversed(posiciones_a_cerrar):
         PAPER_BALANCE += pnl
         PAPER_PNL_GLOBAL += pnl
@@ -570,25 +560,43 @@ def paper_revisar_posiciones(precio_actual, df):
             f"🧠 Razones entrada: {', '.join(pos['razones'])}"
         )
         telegram_mensaje(mensaje_cierre)
-
         OPEN_POSITIONS.pop(i)
 
     return len(posiciones_a_cerrar) > 0
 
 # ============================================================
+# HEARTBEAT – mensaje cada 5 minutos por Telegram
+# ============================================================
+ultimo_heartbeat = 0
+
+def enviar_heartbeat(precio, noticia_titulo, sentimiento_label, sentimiento_score, fuente):
+    global ultimo_heartbeat
+    ahora = time.time()
+    if ahora - ultimo_heartbeat >= 300:  # 5 minutos
+        mensaje = (
+            f"🔄 HEARTBEAT - Bot activo\n"
+            f"📰 Última noticia: {noticia_titulo} (fuente: {fuente})\n"
+            f"🧠 Sentimiento: {sentimiento_label} (score: {sentimiento_score:.2f})\n"
+            f"💰 Precio BTC: {precio:.2f}\n"
+            f"⏳ Esperando formación de vela para análisis técnico...\n"
+            f"📊 Posiciones abiertas: {len(OPEN_POSITIONS)}/{MAX_OPEN_TRADES}"
+        )
+        telegram_mensaje(mensaje)
+        ultimo_heartbeat = ahora
+
+# ============================================================
 # LOG EN CONSOLA
 # ============================================================
-def log_estado(estado, decision, razones, filtro_ok, motivo_filtro, num_abiertas, sentimiento_fund):
+def log_estado(estado, decision, razones, filtro_ok, motivo_filtro, num_abiertas):
     logger.info("="*100)
     logger.info(f"🕒 {estado['fecha']} | 💰 BTC: {estado['precio']:.2f}")
-    logger.info(f"📐 Tendencia técnica: {estado['tendencia']} | Slope: {estado['slope']:.5f}")
+    logger.info(f"📐 Tendencia: {estado['tendencia']} | Slope: {estado['slope']:.5f}")
     logger.info(f"🧱 Soporte: {estado['soporte']:.2f} | Resistencia: {estado['resistencia']:.2f}")
     logger.info(f"📊 ATR: {estado['atr']:.2f} | EMA20: {estado['ema20']:.2f}")
     logger.info(f"📏 Patrón de vela: {estado['patron']}")
     logger.info(f"🧠 Sentimiento técnico: {estado['sentimiento']} ({'Alcista' if estado['sentimiento']>0 else 'Bajista' if estado['sentimiento']<0 else 'Neutral'})")
-    logger.info(f"📰 Sentimiento fundamental: {sentimiento_fund['label']} (score: {sentimiento_fund['score']:.2f})")
-    logger.info(f"🎯 Decisión técnica: {decision if decision else 'NO TRADE'}")
-    logger.info(f"🧠 Razones técnicas: {', '.join(razones)}")
+    logger.info(f"🎯 Decisión: {decision if decision else 'NO TRADE'}")
+    logger.info(f"🧠 Razones: {', '.join(razones)}")
     logger.info(f"🔒 Filtro fundamental: {'PERMITIDO' if filtro_ok else 'BLOQUEADO'} - {motivo_filtro}")
     logger.info(f"📊 Posiciones abiertas: {num_abiertas}/{MAX_OPEN_TRADES}")
     logger.info("="*100)
@@ -597,40 +605,42 @@ def log_estado(estado, decision, razones, filtro_ok, motivo_filtro, num_abiertas
 # LOOP PRINCIPAL
 # ============================================================
 def run_bot():
-    telegram_mensaje("🤖 BOT V90.2 HÍBRIDO DETERMINISTA (SIN IA)\n"
-                     f"📊 Intervalo: {INTERVAL}m | Máx. posiciones abiertas: {MAX_OPEN_TRADES}\n"
-                     "🔍 Análisis fundamental con cryptocurrency.cv")
+    global ultimo_heartbeat
+    telegram_mensaje("🤖 BOT V90.2 INICIADO (SIN IA)\n"
+                     f"📊 Velas: {INTERVAL}m | Heartbeat cada 5min | Máx. posiciones: {MAX_OPEN_TRADES}")
     ultima_fecha = None
 
     while True:
         try:
-            # 1. Obtener datos de mercado
+            # 1. Obtener datos de mercado (velas de 30 min)
             df = obtener_velas()
             df = calcular_indicadores(df)
 
             # 2. Extraer estado técnico
             estado = extraer_estado_mercado(df)
 
-            # 3. Obtener sentimiento fundamental (primero)
-            sent_num, label, score = obtener_sentimiento_fundamental("BTC")
-            sentimiento_fund = {'label': label, 'score': score, 'numeric': sent_num}
+            # 3. Obtener noticias y sentimiento (fundamental)
+            titulo, sent_label, sent_score, fuente = obtener_noticias_y_sentimiento("BTC")
 
-            # 4. Decisión técnica (motor V90)
-            decision, soporte, resistencia, razones = motor_v90_tecnico(estado)
+            # 4. Enviar heartbeat cada 5 minutos
+            enviar_heartbeat(estado['precio'], titulo, sent_label, sent_score, fuente)
 
-            # 5. Aplicar filtro fundamental (solo si hay decisión técnica)
+            # 5. Decisión del motor V90 (técnico)
+            decision, soporte, resistencia, razones = motor_v90(estado)
+
+            # 6. Aplicar filtro fundamental (si hay decisión)
             filtro_ok = True
             motivo_filtro = "Sin filtro"
             if decision:
-                filtro_ok, motivo_filtro, _ = aplicar_filtro_fundamental(decision, estado)
+                filtro_ok, motivo_filtro = filtrar_por_fundamental(decision, sent_label)
                 if not filtro_ok:
-                    decision = None  # Anular decisión
+                    decision = None
 
-            # 6. Log
+            # 7. Log en consola
             num_abiertas = len(OPEN_POSITIONS)
-            log_estado(estado, decision, razones, filtro_ok, motivo_filtro, num_abiertas, sentimiento_fund)
+            log_estado(estado, decision, razones, filtro_ok, motivo_filtro, num_abiertas)
 
-            # 7. Ejecutar operación si procede
+            # 8. Ejecutar operación si procede
             if decision and num_abiertas < MAX_OPEN_TRADES:
                 precio = estado['precio']
                 atr_actual = estado['atr']
@@ -644,8 +654,7 @@ def run_bot():
                     resistencia=resistencia,
                     razones=razones,
                     tiempo=tiempo_actual,
-                    estado=estado,
-                    sentimiento_fund=sentimiento_fund
+                    estado=estado
                 )
 
                 if apertura:
@@ -661,10 +670,9 @@ def run_bot():
                         f"📊 PnL Global: {PAPER_PNL_GLOBAL:.4f} USD\n"
                         f"🧠 Razones técnicas:\n• " + "\n• ".join(razones) + "\n"
                         f"📊 Patrón de vela: {estado['patron']}\n"
-                        f"📈 Tendencia técnica: {estado['tendencia']}\n"
+                        f"📈 Tendencia: {estado['tendencia']}\n"
                         f"🧱 Soporte: {soporte:.2f} | Resistencia: {resistencia:.2f}\n"
                         f"📉 EMA20: {estado['ema20']:.2f} (actúa como {estado['ema_nivel']})\n"
-                        f"📰 Sentimiento fundamental: {sentimiento_fund['label']} (score: {sentimiento_fund['score']:.2f})\n"
                         f"🔒 Filtro fundamental: {motivo_filtro}\n"
                         f"📊 Posiciones abiertas: {len(OPEN_POSITIONS)}/{MAX_OPEN_TRADES}"
                     )
@@ -679,21 +687,20 @@ def run_bot():
                         slope=estado['slope'],
                         intercept=estado['intercept'],
                         razones=razones,
-                        estado=estado,
-                        sentimiento_fund=sentimiento_fund
+                        estado=estado
                     )
                     if fig:
                         telegram_grafico(fig)
                         plt.close(fig)
             else:
                 if num_abiertas >= MAX_OPEN_TRADES:
-                    logger.info(f"Límite de {MAX_OPEN_TRADES} posiciones abiertas alcanzado. No se abren nuevas.")
+                    logger.info(f"Límite de {MAX_OPEN_TRADES} posiciones abiertas alcanzado.")
 
-            # 8. Revisar SL/TP de todas las posiciones abiertas
+            # 9. Revisar SL/TP de todas las posiciones abiertas
             precio_actual = estado['precio']
             se_cerro = paper_revisar_posiciones(precio_actual, df)
 
-            # 9. Reset diario (opcional)
+            # 10. Reset diario (opcional)
             fecha_hoy = datetime.now(timezone.utc).date()
             if ultima_fecha is None:
                 ultima_fecha = fecha_hoy
@@ -701,7 +708,7 @@ def run_bot():
                 ultima_fecha = fecha_hoy
                 logger.info("Nuevo día.")
 
-            # 10. Esperar
+            # 11. Esperar 5 minutos para el próximo ciclo
             time.sleep(SLEEP_SECONDS)
 
         except Exception as e:
