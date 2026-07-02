@@ -1,12 +1,13 @@
 # ============================================================
 # BOT TRADING V90.3 – HÍBRIDO DETERMINISTA (SIN IA)
 # ============================================================
-# - Velas de 5 minutos, máximo 3 operaciones abiertas      # <<< CAMBIO
+# - Velas de 5 minutos, máximo 3 operaciones abiertas
 # - Heartbeat cada 5 minutos con noticia y sentimiento (desde caché)
-# - Fuente principal: NewsAPI (caché 1 hora)              # <<< CAMBIO
+# - Fuente principal: NewsAPI (caché 1 hora)
 # - Sentimiento con VADER (léxico, sin IA)
 # - Gráfico con fondo negro y flecha de entrada
 # - MEJORAS: vela cerrada, patrones multivela, confirmación, SL/TP ajustado, gráfico de cierre
+# - SEGURIDAD: verificaciones contra DataFrame vacío
 # ============================================================
 
 import os
@@ -38,7 +39,7 @@ logger = logging.getLogger(__name__)
 # CONFIGURACIÓN GENERAL
 # ============================================================
 SYMBOL = "BTCUSDT"
-INTERVAL = "5"                 # 5 minutos                    # <<< CAMBIO
+INTERVAL = "5"                 # 5 minutos
 RISK_PER_TRADE = 0.0025        # 0.25% del balance por operación
 MAX_OPEN_TRADES = 3            # máximo 3 operaciones abiertas simultáneas
 SLEEP_SECONDS = 300            # 5 minutos (heartbeat y revisión)
@@ -56,7 +57,7 @@ NEWS_CACHE = {
     "sent_score": 0.0,
     "timestamp": None
 }
-NEWS_CACHE_TTL = 3600          # 1 hora en segundos          # <<< CAMBIO
+NEWS_CACHE_TTL = 3600          # 1 hora en segundos
 
 # ============================================================
 # PAPER TRADING (SIMULACIÓN) – GESTIÓN DE POSICIONES
@@ -78,7 +79,7 @@ BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
-NEWS_API_KEY = os.getenv("NEWS_API_KEY")   # Opcional pero recomendada
+NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 
 if not BYBIT_API_KEY or not BYBIT_API_SECRET:
     raise Exception("❌ BYBIT_API_KEY o BYBIT_API_SECRET no configuradas")
@@ -94,7 +95,7 @@ sentiment_analyzer = SentimentIntensityAnalyzer()
 BASE_URL = "https://api.bybit.com"
 
 # ============================================================
-# TELEGRAM (SIN PROXY)
+# TELEGRAM
 # ============================================================
 def telegram_mensaje(texto):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -119,7 +120,7 @@ def telegram_grafico(fig):
         logger.error(f"Telegram photo error: {e}")
 
 # ============================================================
-# FIRMA BYBIT (para futuras órdenes reales)
+# FIRMA BYBIT
 # ============================================================
 def sign(params):
     query = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
@@ -174,27 +175,24 @@ def calcular_indicadores(df):
     return df.dropna()
 
 # ============================================================
-# CEREBRO DE DATOS: extraer estado del mercado (usando vela cerrada)
+# CEREBRO DE DATOS
 # ============================================================
 def extraer_estado_mercado(df, usar_cerrada=True):
-    """
-    Extrae el estado del mercado a partir de la última vela cerrada (índice -2)
-    si usar_cerrada es True; si no, usa la última disponible (puede estar abierta).
-    """
-    # Elegir índice: -2 (cerrada) o -1 (última)
+    # <<< FIX: seguridad contra DataFrame vacío
+    if df.empty:
+        return None
+
     idx = -2 if usar_cerrada and len(df) >= 2 else -1
     fila = df.iloc[idx]
     
     precio = fila['close']
-    ema20 = df['ema20'].iloc[idx]   # Nota: el EMA se calcula con todas las velas, pero tomamos el valor en esa fila
+    ema20 = df['ema20'].iloc[idx]
     atr = df['atr'].iloc[idx]
 
     ventana = 50
     if len(df) < ventana:
         ventana = len(df)
-    # Calcular soporte/resistencia con ventana de 50 velas, pero excluyendo la última si está abierta
-    # Para simplificar, usamos todo el df hasta el índice idx
-    df_subset = df.iloc[:idx+1] if idx < 0 else df.iloc[:idx+1]  # incluye hasta idx
+    df_subset = df.iloc[:idx+1] if idx < 0 else df.iloc[:idx+1]
     if len(df_subset) < ventana:
         ventana = len(df_subset)
     min_50 = df_subset['close'].rolling(ventana).min().iloc[-1]
@@ -265,19 +263,15 @@ def extraer_estado_mercado(df, usar_cerrada=True):
         'close': close_actual,
         'sombra_superior': sombra_superior,
         'sombra_inferior': sombra_inferior,
-        'idx': idx  # guardamos el índice usado
+        'idx': idx
     }
     return estado
 
 def _detectar_tendencia(df, idx, ventana=80):
-    """
-    Detecta tendencia usando los últimos 'ventana' precios hasta el índice idx.
-    """
     if idx < 0:
-        idx = len(df) + idx  # convertir a positivo
+        idx = len(df) + idx
     if idx < ventana:
         ventana = idx + 1 if idx >= 0 else 1
-    # Tomamos los precios desde idx-ventana+1 hasta idx
     inicio = max(0, idx - ventana + 1)
     y = df['close'].values[inicio:idx+1]
     if len(y) < 2:
@@ -296,21 +290,17 @@ def _detectar_tendencia(df, idx, ventana=80):
 # PATRONES MULTIVELA Y CONFIRMACIÓN
 # ============================================================
 def detectar_patron_multivela(df, n=3):
-    """Detecta tres soldados blancos o tres cuervos negros en las últimas n velas (cerradas)."""
     if len(df) < n:
         return None, ""
     closes = df['close'].iloc[-n:].values
     opens = df['open'].iloc[-n:].values
-    # Tres soldados blancos: n velas alcistas consecutivas con cierre > apertura y cierre > cierre anterior
     if all(closes[i] > opens[i] and closes[i] > closes[i-1] for i in range(1, n)):
         return "tres_soldados_blancos", "Alcista fuerte (continuación)"
-    # Tres cuervos negros: n velas bajistas consecutivas con cierre < apertura y cierre < cierre anterior
     if all(closes[i] < opens[i] and closes[i] < closes[i-1] for i in range(1, n)):
         return "tres_cuervos_negros", "Bajista fuerte (continuación)"
     return None, ""
 
 def confirmar_patron(estado_ant, estado_act):
-    """Confirma si el patrón de la vela anterior (estado_ant) se confirma con la actual (estado_act)."""
     if estado_ant['patron'] == "Martillo (posible reversión alcista)" and estado_act['close'] > estado_ant['close']:
         return True, "Martillo confirmado (alcista)"
     if estado_ant['patron'] == "Estrella fugaz (posible reversión bajista)" and estado_act['close'] < estado_ant['close']:
@@ -318,16 +308,12 @@ def confirmar_patron(estado_ant, estado_act):
     return False, ""
 
 # ============================================================
-# MOTOR DE DECISIÓN V90 MEJORADO (con multivela y confirmación)
+# MOTOR DE DECISIÓN V90 MEJORADO
 # ============================================================
 def motor_v90(estado_actual, df):
-    """
-    Toma decisiones basadas en:
-    - Estado de la última vela cerrada (estado_actual)
-    - Patrones multivela (tres soldados, tres cuervos)
-    - Confirmación de martillo/estrella fugaz
-    - Reglas originales de soporte/resistencia/EMA
-    """
+    if estado_actual is None:
+        return None, 0, 0, ["Estado nulo"]
+
     precio = estado_actual['precio']
     soporte = estado_actual['soporte']
     resistencia = estado_actual['resistencia']
@@ -339,40 +325,33 @@ def motor_v90(estado_actual, df):
 
     razones = []
 
-    # ---- 1. Detectar patrón multivela ----
     patron_mult, desc_mult = detectar_patron_multivela(df)
     if patron_mult:
         razones.append(desc_mult)
 
-    # ---- 2. Confirmar patrón de la vela anterior (si existe) ----
     confirmado = False
     msg_conf = ""
+    estado_ant = None
     if len(df) >= 3:
-        # Obtenemos el estado de la vela anterior (índice -3 si la actual es -2, o -2 si la actual es -1)
-        # Como estado_actual usa índice -2, la anterior es -3
-        # Para simplificar, extraemos el estado de la vela en índice -3
         if estado_actual['idx'] == -2:
             idx_ant = -3
         else:
-            idx_ant = -2  # si estado_actual es -1, usamos -2
-        # Pero mejor: obtenemos el estado de la vela anterior usando la función con usar_cerrada=False y seleccionando el índice adecuado
-        # Vamos a crear una función auxiliar para obtener estado de un índice específico
+            idx_ant = -2
         estado_ant = extraer_estado_mercado_por_indice(df, idx_ant)
         if estado_ant:
             confirmado, msg_conf = confirmar_patron(estado_ant, estado_actual)
             if confirmado:
                 razones.append(msg_conf)
 
-    # ---- 3. Reglas con prioridad ----
-    # 3a. Reversión confirmada en soporte/resistencia
-    if confirmado and "Martillo" in estado_ant['patron'] and abs(precio - soporte) < atr:
-        razones.append("Martillo confirmado en soporte")
-        return 'Buy', soporte, resistencia, razones
-    if confirmado and "Estrella" in estado_ant['patron'] and abs(precio - resistencia) < atr:
-        razones.append("Estrella fugaz confirmada en resistencia")
-        return 'Sell', soporte, resistencia, razones
+    # Reversiones confirmadas
+    if confirmado and estado_ant is not None:
+        if "Martillo" in estado_ant['patron'] and abs(precio - soporte) < atr:
+            razones.append("Martillo confirmado en soporte")
+            return 'Buy', soporte, resistencia, razones
+        if "Estrella" in estado_ant['patron'] and abs(precio - resistencia) < atr:
+            razones.append("Estrella fugaz confirmada en resistencia")
+            return 'Sell', soporte, resistencia, razones
 
-    # 3b. Patrones de continuación con tendencia
     if patron_mult == "tres_soldados_blancos" and tendencia == '📈 ALCISTA' and precio > ema20:
         razones.append("Tres soldados blancos en tendencia alcista")
         return 'Buy', soporte, resistencia, razones
@@ -380,8 +359,6 @@ def motor_v90(estado_actual, df):
         razones.append("Tres cuervos negros en tendencia bajista")
         return 'Sell', soporte, resistencia, razones
 
-    # ---- 4. Reglas originales (con prioridad menor) ----
-    # 4a. Soporte + tendencia alcista
     if (abs(precio - soporte) < atr) and (tendencia == '📈 ALCISTA' or tendencia == '➡️ LATERAL'):
         razones.append(f"Precio cerca de soporte ({soporte:.2f})")
         razones.append("Tendencia alcista o lateral")
@@ -389,7 +366,6 @@ def motor_v90(estado_actual, df):
             razones.append(f"Patrón de vela: {patron}")
         return 'Buy', soporte, resistencia, razones
 
-    # 4b. Resistencia + tendencia bajista
     if (abs(precio - resistencia) < atr) and (tendencia == '📉 BAJISTA' or tendencia == '➡️ LATERAL'):
         razones.append(f"Precio cerca de resistencia ({resistencia:.2f})")
         razones.append("Tendencia bajista o lateral")
@@ -397,7 +373,6 @@ def motor_v90(estado_actual, df):
             razones.append(f"Patrón de vela: {patron}")
         return 'Sell', soporte, resistencia, razones
 
-    # 4c. EMA como resistencia
     if ema_nivel == 'resistencia' and abs(precio - ema20) < atr * 0.5 and tendencia != '📈 ALCISTA':
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde abajo (EMA actúa como resistencia)")
         razones.append("Sin ruptura al alza")
@@ -405,7 +380,6 @@ def motor_v90(estado_actual, df):
             razones.append(f"Patrón de vela: {patron}")
         return 'Sell', soporte, resistencia, razones
 
-    # 4d. EMA como soporte
     if ema_nivel == 'soporte' and abs(precio - ema20) < atr * 0.5 and tendencia != '📉 BAJISTA':
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde arriba (EMA actúa como soporte)")
         razones.append("Sin ruptura a la baja")
@@ -413,7 +387,6 @@ def motor_v90(estado_actual, df):
             razones.append(f"Patrón de vela: {patron}")
         return 'Buy', soporte, resistencia, razones
 
-    # 4e. Ruptura de EMA (solo si la vela actual cierra fuera)
     if estado_actual['close'] > ema20 and estado_actual['open'] < ema20 and estado_actual['close'] > estado_actual['open']:
         razones.append(f"Ruptura alcista de EMA20 ({ema20:.2f})")
         razones.append(f"Patrón de vela: {patron}")
@@ -428,33 +401,28 @@ def motor_v90(estado_actual, df):
     return None, soporte, resistencia, razones
 
 # ============================================================
-# FUNCIÓN AUXILIAR PARA EXTRAER ESTADO POR ÍNDICE
+# FUNCIÓN AUXILIAR PARA EXTRAER ESTADO POR ÍNDICE (CON SEGURIDAD)
 # ============================================================
 def extraer_estado_mercado_por_indice(df, idx):
-    """Extrae el estado del mercado para una fila específica (índice negativo o positivo)."""
+    # <<< FIX: seguridad mejorada
+    if df.empty:
+        return None
     if idx < 0:
         idx = len(df) + idx
     if idx < 0 or idx >= len(df):
         return None
-    fila = df.iloc[idx]
-    # Reutilizamos la lógica de extraer_estado_mercado pero para un índice dado
-    # Para simplificar, adaptamos la función original usando el índice
-    precio = fila['close']
-    ema20 = df['ema20'].iloc[idx]
-    atr = df['atr'].iloc[idx]
-    # ... (copiar el resto, pero es mucho código, mejor llamamos a extraer_estado_mercado con un df recortado)
-    # Alternativa: crear un df temporal que termine en idx
+    # Asegurar que el slice no sea vacío
+    if idx + 1 <= 0:
+        return None
     df_temp = df.iloc[:idx+1]
-    return extraer_estado_mercado(df_temp, usar_cerrada=False)  # pero con idx=-1
-
-# Para simplificar, en lugar de esta función, usaremos directamente la lógica de extraer estado para un índice específico.
-# Pero por ahora, la dejamos así y la usaremos en motor_v90.
+    if df_temp.empty:
+        return None
+    return extraer_estado_mercado(df_temp, usar_cerrada=False)
 
 # ============================================================
 # FILTRO FUNDAMENTAL CON NEWSAPI + GOOGLE RSS + CACHÉ
 # ============================================================
 def actualizar_cache_noticias():
-    """Actualiza la caché de noticias si ha expirado (TTL 1 hora)."""
     global NEWS_CACHE
     ahora = datetime.now(timezone.utc)
 
@@ -476,7 +444,6 @@ def actualizar_cache_noticias():
     logger.info(f"✅ Caché actualizada: {titulo} | {sent_label} ({sent_score:.3f})")
 
 def _obtener_noticias_frescas():
-    """Obtiene noticias desde NewsAPI o Google RSS, y calcula sentimiento con VADER."""
     noticias = []
     fuente = "Ninguna"
 
@@ -565,6 +532,9 @@ def filtrar_por_fundamental(decision, sent_label):
 # GRÁFICO DE VELAS JAPONESAS CON FONDO NEGRO (ENTRADA)
 # ============================================================
 def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept, razones, estado):
+    # <<< FIX: seguridad
+    if df.empty:
+        return None
     try:
         plt.style.use('dark_background')
         df_plot = df.copy().tail(GRAFICO_VELAS_LIMIT)
@@ -650,13 +620,10 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
 # GRÁFICO DE CIERRE DE OPERACIÓN
 # ============================================================
 def generar_grafico_cierre(df, posicion, precio_salida, motivo):
-    """
-    Genera un gráfico que muestra desde la entrada hasta la salida,
-    marcando SL, TP, entrada y salida.
-    """
+    # <<< FIX: seguridad
+    if df.empty:
+        return None
     try:
-        # Recortar el DataFrame desde la entrada hasta el final
-        # La posición guarda el timestamp de entrada
         entrada_time = posicion['timestamp']
         df_recorte = df[df.index >= entrada_time].copy()
         if len(df_recorte) < 2:
@@ -673,7 +640,6 @@ def generar_grafico_cierre(df, posicion, precio_salida, motivo):
         fig, ax = plt.subplots(figsize=(14, 7), facecolor='black')
         ax.set_facecolor('black')
 
-        # Dibujar velas
         for i in range(len(df_recorte)):
             color = 'lime' if closes[i] >= opens[i] else 'red'
             ax.vlines(x[i], lows[i], highs[i], color=color, linewidth=1)
@@ -684,16 +650,12 @@ def generar_grafico_cierre(df, posicion, precio_salida, motivo):
             rect = plt.Rectangle((x[i] - 0.3, cuerpo_y), 0.6, cuerpo_h, color=color, alpha=0.9)
             ax.add_patch(rect)
 
-        # Líneas de SL y TP (constantes)
         ax.axhline(posicion['sl'], color='orange', linestyle='--', linewidth=2, label=f"SL {posicion['sl']:.2f}")
         ax.axhline(posicion['tp'], color='deepskyblue', linestyle='--', linewidth=2, label=f"TP {posicion['tp']:.2f}")
 
-        # Línea de entrada (vertical)
         ax.axvline(x=0, color='white', linestyle=':', linewidth=2, label='Entrada')
-        # Línea de salida (vertical)
         ax.axvline(x=len(df_recorte)-1, color='yellow', linestyle=':', linewidth=2, label='Salida')
 
-        # Marcar entrada y salida con flechas
         entrada_y = posicion['entry_price']
         ax.scatter(0, entrada_y, s=200, marker='^' if posicion['decision']=='Buy' else 'v',
                    color='lime' if posicion['decision']=='Buy' else 'red', edgecolors='black', zorder=5)
@@ -722,7 +684,7 @@ def generar_grafico_cierre(df, posicion, precio_salida, motivo):
         return None
 
 # ============================================================
-# PAPER TRADING – ABRIR Y CERRAR POSICIONES (con SL/TP ajustado)
+# PAPER TRADING – ABRIR Y CERRAR POSICIONES
 # ============================================================
 def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, tiempo, estado):
     global PAPER_BALANCE, PAPER_BALANCE_MAX, PAPER_MAX_DRAWDOWN, OPEN_POSITIONS
@@ -731,10 +693,8 @@ def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, t
         return False
 
     riesgo_usd = PAPER_BALANCE * RISK_PER_TRADE
-    # SL más holgado (1.5 * ATR)
     if decision == "Buy":
         sl = precio - 1.5 * atr
-        # TP: tomar la resistencia o 2.5 * ATR (el que esté más cerca)
         tp = min(resistencia, precio + 2.5 * atr)
     else:
         sl = precio + 1.5 * atr
@@ -818,7 +778,6 @@ def paper_revisar_posiciones(precio_actual, df_actual):
         )
         telegram_mensaje(mensaje_cierre)
 
-        # Enviar gráfico de cierre
         fig = generar_grafico_cierre(df_actual, pos, precio_actual, motivo)
         if fig:
             telegram_grafico(fig)
@@ -882,8 +841,18 @@ def run_bot():
             df = obtener_velas()
             df = calcular_indicadores(df)
 
-            # 2. Extraer estado usando la última vela cerrada (índice -2)
+            # <<< FIX: verificar que el DataFrame no esté vacío
+            if df.empty:
+                logger.warning("⚠️ DataFrame vacío después de indicadores. Saltando ciclo...")
+                time.sleep(SLEEP_SECONDS)
+                continue
+
+            # 2. Extraer estado usando la última vela cerrada
             estado = extraer_estado_mercado(df, usar_cerrada=True)
+            if estado is None:
+                logger.warning("⚠️ Estado nulo. Saltando ciclo...")
+                time.sleep(SLEEP_SECONDS)
+                continue
 
             # 3. Noticias y sentimiento (desde caché)
             titulo, fuente, sent_label, sent_score = obtener_noticias_y_sentimiento()
@@ -891,7 +860,7 @@ def run_bot():
             # 4. Heartbeat
             enviar_heartbeat(estado['precio'], titulo, fuente, sent_label, sent_score)
 
-            # 5. Decisión técnica (motor mejorado)
+            # 5. Decisión técnica
             decision, soporte, resistencia, razones = motor_v90(estado, df)
 
             # 6. Filtro fundamental
@@ -953,7 +922,7 @@ def run_bot():
                         telegram_grafico(fig)
                         plt.close(fig)
 
-            # 9. Revisar SL/TP y cerrar posiciones (envía gráfico de cierre)
+            # 9. Revisar SL/TP y cerrar posiciones
             precio_actual = estado['precio']
             paper_revisar_posiciones(precio_actual, df)
 
