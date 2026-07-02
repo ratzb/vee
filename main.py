@@ -7,7 +7,7 @@
 # - Sentimiento con VADER (léxico, sin IA)
 # - Gráfico con fondo negro y flecha de entrada
 # - MEJORAS: vela cerrada, patrones multivela, confirmación, SL/TP ajustado, gráfico de cierre
-# - SEGURIDAD: verificaciones contra DataFrame vacío
+# - SEGURIDAD EXTREMA: manejo de DataFrames vacíos o con pocas filas
 # ============================================================
 
 import os
@@ -172,38 +172,75 @@ def calcular_indicadores(df):
         (df['low'] - df['close'].shift()).abs()
     ], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
-    return df.dropna()
+    # No dropna aquí para no perder filas, lo haremos después de verificar
+    return df
 
 # ============================================================
-# CEREBRO DE DATOS
+# CEREBRO DE DATOS – EXTRAER ESTADO CON SEGURIDAD ABSOLUTA
 # ============================================================
 def extraer_estado_mercado(df, usar_cerrada=True):
-    # <<< FIX: seguridad contra DataFrame vacío
+    """
+    Extrae el estado del mercado a partir de la última vela cerrada (índice -2)
+    si usar_cerrada es True y hay al menos 2 filas; si no, usa la última disponible.
+    Maneja todos los casos de DataFrame vacío o con pocas filas.
+    """
     if df.empty:
         return None
 
+    # Asegurar que tenemos al menos 2 filas para usar_cerrada, si no, forzamos usar_cerrada=False
+    if usar_cerrada and len(df) < 2:
+        usar_cerrada = False
+
+    # Elegir índice: -2 (cerrada) o -1 (última)
     idx = -2 if usar_cerrada and len(df) >= 2 else -1
+
+    # Verificar que el índice sea válido
+    if idx < -len(df) or idx >= len(df):
+        # Si por algún motivo el índice no es válido, usar -1
+        idx = -1
+
     fila = df.iloc[idx]
-    
     precio = fila['close']
+    # Si 'ema20' o 'atr' son NaN, tomar el último valor disponible (forward fill)
     ema20 = df['ema20'].iloc[idx]
     atr = df['atr'].iloc[idx]
+    if pd.isna(ema20):
+        # Buscar el último valor no nulo hacia atrás
+        ema_serie = df['ema20'].dropna()
+        if not ema_serie.empty:
+            ema20 = ema_serie.iloc[-1]
+        else:
+            ema20 = precio  # fallback
+    if pd.isna(atr):
+        atr_serie = df['atr'].dropna()
+        if not atr_serie.empty:
+            atr = atr_serie.iloc[-1]
+        else:
+            atr = precio * 0.01  # fallback: 1% de precio
 
-    ventana = 50
-    if len(df) < ventana:
-        ventana = len(df)
-    df_subset = df.iloc[:idx+1] if idx < 0 else df.iloc[:idx+1]
-    if len(df_subset) < ventana:
-        ventana = len(df_subset)
-    min_50 = df_subset['close'].rolling(ventana).min().iloc[-1]
-    max_50 = df_subset['close'].rolling(ventana).max().iloc[-1]
+    # Calcular soporte/resistencia con ventana de 50, pero solo si hay suficientes datos
+    ventana = min(50, len(df))
+    if ventana < 2:
+        # Si hay muy pocos datos, usar el mínimo y máximo de todo el df
+        min_50 = df['close'].min()
+        max_50 = df['close'].max()
+    else:
+        # Usamos rolling, pero debemos asegurar que el resultado no esté vacío
+        # Usamos los últimos 'ventana' valores
+        min_50 = df['close'].iloc[-ventana:].min()
+        max_50 = df['close'].iloc[-ventana:].max()
 
     if precio > max_50:
         soporte = max_50
-        resistencia = df_subset['close'].rolling(ventana).max().iloc[-1]
+        resistencia = max_50  # no hay resistencia definida, usamos el mismo
     else:
         soporte = min_50
         resistencia = max_50
+
+    # Ajustar si soporte y resistencia son iguales (caso extremo)
+    if soporte == resistencia:
+        soporte = precio * 0.99
+        resistencia = precio * 1.01
 
     if precio > ema20:
         ema_nivel = 'soporte'
@@ -236,12 +273,6 @@ def extraer_estado_mercado(df, usar_cerrada=True):
         patron = "Vela normal"
 
     slope, intercept, tendencia = _detectar_tendencia(df, idx)
-    if slope > 0.02:
-        sentimiento = 1
-    elif slope < -0.02:
-        sentimiento = -1
-    else:
-        sentimiento = 0
 
     estado = {
         'precio': precio,
@@ -255,7 +286,7 @@ def extraer_estado_mercado(df, usar_cerrada=True):
         'slope': slope,
         'intercept': intercept,
         'tendencia': tendencia,
-        'sentimiento': sentimiento,
+        'sentimiento': 1 if slope > 0.02 else (-1 if slope < -0.02 else 0),
         'fecha': df.index[idx],
         'open': open_actual,
         'high': high_actual,
@@ -268,11 +299,23 @@ def extraer_estado_mercado(df, usar_cerrada=True):
     return estado
 
 def _detectar_tendencia(df, idx, ventana=80):
+    """
+    Detecta tendencia usando los últimos 'ventana' precios hasta el índice idx.
+    Maneja casos con pocos datos.
+    """
+    # Asegurar que idx es válido
     if idx < 0:
         idx = len(df) + idx
-    if idx < ventana:
-        ventana = idx + 1 if idx >= 0 else 1
+    if idx < 0:
+        idx = 0
+    if idx >= len(df):
+        idx = len(df) - 1
+
+    # Determinar el inicio
     inicio = max(0, idx - ventana + 1)
+    if inicio > idx:
+        inicio = idx
+    # Extraer precios
     y = df['close'].values[inicio:idx+1]
     if len(y) < 2:
         return 0, 0, "➡️ LATERAL"
@@ -285,6 +328,22 @@ def _detectar_tendencia(df, idx, ventana=80):
     else:
         direccion = '➡️ LATERAL'
     return slope, intercept, direccion
+
+# ============================================================
+# FUNCIÓN AUXILIAR PARA EXTRAER ESTADO POR ÍNDICE (CON SEGURIDAD)
+# ============================================================
+def extraer_estado_mercado_por_indice(df, idx):
+    if df.empty:
+        return None
+    if idx < 0:
+        idx = len(df) + idx
+    if idx < 0 or idx >= len(df):
+        return None
+    # Si idx es 0, el slice df.iloc[:1] es válido
+    df_temp = df.iloc[:idx+1]
+    if df_temp.empty:
+        return None
+    return extraer_estado_mercado(df_temp, usar_cerrada=False)
 
 # ============================================================
 # PATRONES MULTIVELA Y CONFIRMACIÓN
@@ -401,25 +460,6 @@ def motor_v90(estado_actual, df):
     return None, soporte, resistencia, razones
 
 # ============================================================
-# FUNCIÓN AUXILIAR PARA EXTRAER ESTADO POR ÍNDICE (CON SEGURIDAD)
-# ============================================================
-def extraer_estado_mercado_por_indice(df, idx):
-    # <<< FIX: seguridad mejorada
-    if df.empty:
-        return None
-    if idx < 0:
-        idx = len(df) + idx
-    if idx < 0 or idx >= len(df):
-        return None
-    # Asegurar que el slice no sea vacío
-    if idx + 1 <= 0:
-        return None
-    df_temp = df.iloc[:idx+1]
-    if df_temp.empty:
-        return None
-    return extraer_estado_mercado(df_temp, usar_cerrada=False)
-
-# ============================================================
 # FILTRO FUNDAMENTAL CON NEWSAPI + GOOGLE RSS + CACHÉ
 # ============================================================
 def actualizar_cache_noticias():
@@ -532,8 +572,7 @@ def filtrar_por_fundamental(decision, sent_label):
 # GRÁFICO DE VELAS JAPONESAS CON FONDO NEGRO (ENTRADA)
 # ============================================================
 def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept, razones, estado):
-    # <<< FIX: seguridad
-    if df.empty:
+    if df.empty or estado is None:
         return None
     try:
         plt.style.use('dark_background')
@@ -620,7 +659,6 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
 # GRÁFICO DE CIERRE DE OPERACIÓN
 # ============================================================
 def generar_grafico_cierre(df, posicion, precio_salida, motivo):
-    # <<< FIX: seguridad
     if df.empty:
         return None
     try:
@@ -841,13 +879,13 @@ def run_bot():
             df = obtener_velas()
             df = calcular_indicadores(df)
 
-            # <<< FIX: verificar que el DataFrame no esté vacío
+            # Verificar que el DataFrame tenga al menos 1 fila después de indicadores
             if df.empty:
                 logger.warning("⚠️ DataFrame vacío después de indicadores. Saltando ciclo...")
                 time.sleep(SLEEP_SECONDS)
                 continue
 
-            # 2. Extraer estado usando la última vela cerrada
+            # 2. Extraer estado usando la última vela cerrada (si es posible)
             estado = extraer_estado_mercado(df, usar_cerrada=True)
             if estado is None:
                 logger.warning("⚠️ Estado nulo. Saltando ciclo...")
