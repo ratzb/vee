@@ -5,8 +5,8 @@
 # - Heartbeat cada 5 minutos con noticia y sentimiento (desde caché)
 # - Fuente principal: NewsAPI (caché 1 hora)
 # - Sentimiento con VADER (léxico, sin IA)
-# - Gráfico con fondo negro y flecha de entrada
-# - MEJORAS: vela cerrada, patrones multivela, confirmación, SL/TP ajustado, gráfico de cierre
+# - Gráfico con fondo negro, flecha de entrada y marcador de salida
+# - MEJORAS: vela cerrada, patrones multivela, confirmación, SL/TP ajustado
 # - SEGURIDAD EXTREMA: manejo de DataFrames vacíos o con pocas filas
 # ============================================================
 
@@ -172,72 +172,44 @@ def calcular_indicadores(df):
         (df['low'] - df['close'].shift()).abs()
     ], axis=1).max(axis=1)
     df['atr'] = tr.rolling(14).mean()
-    # No dropna aquí para no perder filas, lo haremos después de verificar
     return df
 
 # ============================================================
 # CEREBRO DE DATOS – EXTRAER ESTADO CON SEGURIDAD ABSOLUTA
 # ============================================================
 def extraer_estado_mercado(df, usar_cerrada=True):
-    """
-    Extrae el estado del mercado a partir de la última vela cerrada (índice -2)
-    si usar_cerrada es True y hay al menos 2 filas; si no, usa la última disponible.
-    Maneja todos los casos de DataFrame vacío o con pocas filas.
-    """
     if df.empty:
         return None
-
-    # Asegurar que tenemos al menos 2 filas para usar_cerrada, si no, forzamos usar_cerrada=False
     if usar_cerrada and len(df) < 2:
         usar_cerrada = False
-
-    # Elegir índice: -2 (cerrada) o -1 (última)
     idx = -2 if usar_cerrada and len(df) >= 2 else -1
-
-    # Verificar que el índice sea válido
     if idx < -len(df) or idx >= len(df):
-        # Si por algún motivo el índice no es válido, usar -1
         idx = -1
-
     fila = df.iloc[idx]
     precio = fila['close']
-    # Si 'ema20' o 'atr' son NaN, tomar el último valor disponible (forward fill)
     ema20 = df['ema20'].iloc[idx]
     atr = df['atr'].iloc[idx]
     if pd.isna(ema20):
-        # Buscar el último valor no nulo hacia atrás
         ema_serie = df['ema20'].dropna()
-        if not ema_serie.empty:
-            ema20 = ema_serie.iloc[-1]
-        else:
-            ema20 = precio  # fallback
+        ema20 = ema_serie.iloc[-1] if not ema_serie.empty else precio
     if pd.isna(atr):
         atr_serie = df['atr'].dropna()
-        if not atr_serie.empty:
-            atr = atr_serie.iloc[-1]
-        else:
-            atr = precio * 0.01  # fallback: 1% de precio
+        atr = atr_serie.iloc[-1] if not atr_serie.empty else precio * 0.01
 
-    # Calcular soporte/resistencia con ventana de 50, pero solo si hay suficientes datos
     ventana = min(50, len(df))
     if ventana < 2:
-        # Si hay muy pocos datos, usar el mínimo y máximo de todo el df
         min_50 = df['close'].min()
         max_50 = df['close'].max()
     else:
-        # Usamos rolling, pero debemos asegurar que el resultado no esté vacío
-        # Usamos los últimos 'ventana' valores
         min_50 = df['close'].iloc[-ventana:].min()
         max_50 = df['close'].iloc[-ventana:].max()
 
     if precio > max_50:
         soporte = max_50
-        resistencia = max_50  # no hay resistencia definida, usamos el mismo
+        resistencia = max_50
     else:
         soporte = min_50
         resistencia = max_50
-
-    # Ajustar si soporte y resistencia son iguales (caso extremo)
     if soporte == resistencia:
         soporte = precio * 0.99
         resistencia = precio * 1.01
@@ -299,23 +271,15 @@ def extraer_estado_mercado(df, usar_cerrada=True):
     return estado
 
 def _detectar_tendencia(df, idx, ventana=80):
-    """
-    Detecta tendencia usando los últimos 'ventana' precios hasta el índice idx.
-    Maneja casos con pocos datos.
-    """
-    # Asegurar que idx es válido
     if idx < 0:
         idx = len(df) + idx
     if idx < 0:
         idx = 0
     if idx >= len(df):
         idx = len(df) - 1
-
-    # Determinar el inicio
     inicio = max(0, idx - ventana + 1)
     if inicio > idx:
         inicio = idx
-    # Extraer precios
     y = df['close'].values[inicio:idx+1]
     if len(y) < 2:
         return 0, 0, "➡️ LATERAL"
@@ -339,7 +303,6 @@ def extraer_estado_mercado_por_indice(df, idx):
         idx = len(df) + idx
     if idx < 0 or idx >= len(df):
         return None
-    # Si idx es 0, el slice df.iloc[:1] es válido
     df_temp = df.iloc[:idx+1]
     if df_temp.empty:
         return None
@@ -402,7 +365,6 @@ def motor_v90(estado_actual, df):
             if confirmado:
                 razones.append(msg_conf)
 
-    # Reversiones confirmadas
     if confirmado and estado_ant is not None:
         if "Martillo" in estado_ant['patron'] and abs(precio - soporte) < atr:
             razones.append("Martillo confirmado en soporte")
@@ -569,9 +531,13 @@ def filtrar_por_fundamental(decision, sent_label):
     return True, f"Sentimiento permitido ({sent_label})"
 
 # ============================================================
-# GRÁFICO DE VELAS JAPONESAS CON FONDO NEGRO (ENTRADA)
+# GRÁFICO DE VELAS JAPONESAS CON FONDO NEGRO (ENTRADA Y SALIDA)
 # ============================================================
-def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept, razones, estado):
+def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept, razones, estado, precio_salida=None):
+    """
+    Genera el gráfico de velas con soporte/resistencia, EMA, tendencia,
+    flecha de entrada y, opcionalmente, marcador de salida.
+    """
     if df.empty or estado is None:
         return None
     try:
@@ -590,6 +556,7 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         fig, ax = plt.subplots(figsize=(14, 7), facecolor='black')
         ax.set_facecolor('black')
 
+        # Dibujar velas
         for i in range(len(df_plot)):
             color = 'lime' if closes[i] >= opens[i] else 'red'
             ax.vlines(x[i], lows[i], highs[i], color=color, linewidth=1)
@@ -600,12 +567,15 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
             rect = plt.Rectangle((x[i] - 0.3, cuerpo_y), 0.6, cuerpo_h, color=color, alpha=0.9)
             ax.add_patch(rect)
 
+        # Líneas de soporte/resistencia
         ax.axhline(soporte, color='cyan', linestyle='--', linewidth=2, label=f"Soporte {soporte:.2f}")
         ax.axhline(resistencia, color='magenta', linestyle='--', linewidth=2, label=f"Resistencia {resistencia:.2f}")
 
+        # EMA20
         if MOSTRAR_EMA20 and 'ema20' in df_plot.columns:
             ax.plot(x, df_plot['ema20'].values, color='yellow', linewidth=2, label='EMA20')
 
+        # Línea de tendencia
         y_plot = df_plot['close'].values
         x_plot = np.arange(len(y_plot))
         slope_plot, intercept_plot, r_plot, _, _ = linregress(x_plot, y_plot)
@@ -613,6 +583,7 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         ax.plot(x_plot, tendencia_linea, color='white', linewidth=1.5, linestyle='-',
                 label=f"Tendencia slope {slope_plot:.4f}")
 
+        # Marcador de entrada (siempre en la última vela)
         entrada_x = len(df_plot) - 1
         entrada_precio = closes[-1]
         if decision == 'Buy':
@@ -626,9 +597,17 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
             ax.annotate('', xy=(entrada_x, entrada_precio), xytext=(entrada_x-2, entrada_precio+0.5*estado['atr']),
                         arrowprops=dict(arrowstyle='->', color='red', lw=3))
 
+        # Marcador de salida (si se proporciona)
+        if precio_salida is not None:
+            ax.scatter(entrada_x, precio_salida, s=200, marker='s', color='yellow',
+                       edgecolors='black', linewidths=2, label='Salida', zorder=6)
+            # Opcional: línea horizontal hasta el precio de salida
+            ax.axhline(precio_salida, color='yellow', linestyle=':', linewidth=1, alpha=0.5)
+
+        # Texto informativo
         texto = (
             f"{decision.upper()}\n"
-            f"Precio: {entrada_precio:.2f}\n"
+            f"Precio entrada: {entrada_precio:.2f}\n"
             f"Hora: {times[-1].strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
             f"Soporte: {soporte:.2f}  Resistencia: {resistencia:.2f}\n"
             f"EMA20: {estado['ema20']:.2f}  ATR: {estado['atr']:.2f}\n"
@@ -636,11 +615,13 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
             f"Patrón: {estado['patron']}\n"
             f"Razones: {', '.join(razones)}"
         )
+        if precio_salida is not None:
+            texto += f"\nSalida: {precio_salida:.2f}"
         ax.text(0.02, 0.98, texto, transform=ax.transAxes,
                 fontsize=9, verticalalignment='top', color='white',
                 bbox=dict(facecolor='black', alpha=0.7, boxstyle='round'))
 
-        ax.set_title(f"{SYMBOL} - Velas {INTERVAL}m - Entrada {decision}", color='white')
+        ax.set_title(f"{SYMBOL} - Velas {INTERVAL}m - {'Entrada' if precio_salida is None else 'Cierre'}", color='white')
         ax.set_xlabel("Velas", color='white')
         ax.set_ylabel("Precio", color='white')
         ax.grid(True, alpha=0.2, color='gray')
@@ -653,72 +634,6 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         return fig
     except Exception as e:
         logger.error(f"Error en gráfico: {e}")
-        return None
-
-# ============================================================
-# GRÁFICO DE CIERRE DE OPERACIÓN
-# ============================================================
-def generar_grafico_cierre(df, posicion, precio_salida, motivo):
-    if df.empty:
-        return None
-    try:
-        entrada_time = posicion['timestamp']
-        df_recorte = df[df.index >= entrada_time].copy()
-        if len(df_recorte) < 2:
-            return None
-
-        plt.style.use('dark_background')
-        times = df_recorte.index
-        opens = df_recorte['open'].values
-        highs = df_recorte['high'].values
-        lows = df_recorte['low'].values
-        closes = df_recorte['close'].values
-        x = np.arange(len(df_recorte))
-
-        fig, ax = plt.subplots(figsize=(14, 7), facecolor='black')
-        ax.set_facecolor('black')
-
-        for i in range(len(df_recorte)):
-            color = 'lime' if closes[i] >= opens[i] else 'red'
-            ax.vlines(x[i], lows[i], highs[i], color=color, linewidth=1)
-            cuerpo_y = min(opens[i], closes[i])
-            cuerpo_h = abs(closes[i] - opens[i])
-            if cuerpo_h == 0:
-                cuerpo_h = 0.0001
-            rect = plt.Rectangle((x[i] - 0.3, cuerpo_y), 0.6, cuerpo_h, color=color, alpha=0.9)
-            ax.add_patch(rect)
-
-        ax.axhline(posicion['sl'], color='orange', linestyle='--', linewidth=2, label=f"SL {posicion['sl']:.2f}")
-        ax.axhline(posicion['tp'], color='deepskyblue', linestyle='--', linewidth=2, label=f"TP {posicion['tp']:.2f}")
-
-        ax.axvline(x=0, color='white', linestyle=':', linewidth=2, label='Entrada')
-        ax.axvline(x=len(df_recorte)-1, color='yellow', linestyle=':', linewidth=2, label='Salida')
-
-        entrada_y = posicion['entry_price']
-        ax.scatter(0, entrada_y, s=200, marker='^' if posicion['decision']=='Buy' else 'v',
-                   color='lime' if posicion['decision']=='Buy' else 'red', edgecolors='black', zorder=5)
-        ax.scatter(len(df_recorte)-1, precio_salida, s=200, marker='s', color='yellow', edgecolors='black', zorder=5)
-
-        texto = (
-            f"CIERRE {posicion['decision']} - {motivo}\n"
-            f"Entrada: {entrada_y:.2f}  Salida: {precio_salida:.2f}\n"
-            f"SL: {posicion['sl']:.2f}  TP: {posicion['tp']:.2f}\n"
-            f"PnL: {(precio_salida - entrada_y) * posicion['size_btc']:.4f} USD"
-        )
-        ax.text(0.02, 0.98, texto, transform=ax.transAxes,
-                fontsize=10, verticalalignment='top', color='white',
-                bbox=dict(facecolor='black', alpha=0.7, boxstyle='round'))
-
-        ax.set_title(f"{SYMBOL} - Cierre de operación", color='white')
-        ax.set_xlabel("Velas desde entrada", color='white')
-        ax.set_ylabel("Precio", color='white')
-        ax.grid(True, alpha=0.2, color='gray')
-        ax.tick_params(colors='white')
-        ax.legend(loc='lower left', facecolor='black', edgecolor='white', labelcolor='white')
-        plt.tight_layout()
-        return fig
-    except Exception as e:
-        logger.error(f"Error en gráfico de cierre: {e}")
         return None
 
 # ============================================================
@@ -754,7 +669,7 @@ def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, t
         'size_usd': size_usd,
         'razones': razones,
         'timestamp': tiempo,
-        'estado_entrada': estado.copy()
+        'estado_entrada': estado.copy()  # guardamos todo el estado de entrada
     }
     OPEN_POSITIONS.append(posicion)
     return True
@@ -816,7 +731,20 @@ def paper_revisar_posiciones(precio_actual, df_actual):
         )
         telegram_mensaje(mensaje_cierre)
 
-        fig = generar_grafico_cierre(df_actual, pos, precio_actual, motivo)
+        # --- GRÁFICO DE CIERRE: usamos el mismo generador que el de entrada ---
+        # Recuperamos los valores de entrada guardados en la posición
+        estado_ent = pos['estado_entrada']
+        fig = generar_grafico_entrada(
+            df=df_actual,
+            decision=pos['decision'],
+            soporte=estado_ent['soporte'],
+            resistencia=estado_ent['resistencia'],
+            slope=estado_ent['slope'],
+            intercept=estado_ent['intercept'],
+            razones=pos['razones'],
+            estado=estado_ent,
+            precio_salida=precio_actual  # <--- marcador de salida
+        )
         if fig:
             telegram_grafico(fig)
             plt.close(fig)
@@ -879,7 +807,6 @@ def run_bot():
             df = obtener_velas()
             df = calcular_indicadores(df)
 
-            # Verificar que el DataFrame tenga al menos 1 fila después de indicadores
             if df.empty:
                 logger.warning("⚠️ DataFrame vacío después de indicadores. Saltando ciclo...")
                 time.sleep(SLEEP_SECONDS)
@@ -960,7 +887,7 @@ def run_bot():
                         telegram_grafico(fig)
                         plt.close(fig)
 
-            # 9. Revisar SL/TP y cerrar posiciones
+            # 9. Revisar SL/TP y cerrar posiciones (envía gráfico con salida)
             precio_actual = estado['precio']
             paper_revisar_posiciones(precio_actual, df)
 
