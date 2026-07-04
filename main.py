@@ -330,9 +330,14 @@ def confirmar_patron(estado_ant, estado_act):
     return False, ""
 
 # ============================================================
-# MOTOR DE DECISIÓN V90 MEJORADO
+# MOTOR DE DECISIÓN V90 MEJORADO – PRIORIDAD PARA PATRONES
 # ============================================================
 def motor_v90(estado_actual, df):
+    """
+    Nueva lógica: primero se evalúan patrones de reversión (martillo, estrella fugaz)
+    y patrones multivela (tres soldados/cuervos). Si coinciden con el contexto,
+    se devuelve esa señal antes que las condiciones de EMA o soporte/resistencia.
+    """
     if estado_actual is None:
         return None, 0, 0, ["Estado nulo"]
 
@@ -347,10 +352,33 @@ def motor_v90(estado_actual, df):
 
     razones = []
 
+    # ---- 1. PATRONES MULTIVELA (máxima prioridad) ----
     patron_mult, desc_mult = detectar_patron_multivela(df)
-    if patron_mult:
+    if patron_mult == "tres_soldados_blancos" and tendencia in ['📈 ALCISTA', '➡️ LATERAL']:
         razones.append(desc_mult)
+        razones.append("Tres soldados blancos en tendencia favorable")
+        return 'Buy', soporte, resistencia, razones
+    if patron_mult == "tres_cuervos_negros" and tendencia in ['📉 BAJISTA', '➡️ LATERAL']:
+        razones.append(desc_mult)
+        razones.append("Tres cuervos negros en tendencia favorable")
+        return 'Sell', soporte, resistencia, razones
 
+    # ---- 2. PATRONES DE REVERSIÓN INDIVIDUALES (prioridad alta) ----
+    # Martillo: debe aparecer en tendencia bajista o cerca de soporte
+    if "Martillo" in patron:
+        if tendencia == '📉 BAJISTA' or abs(precio - soporte) < atr:
+            razones.append(f"Patrón de reversión alcista: {patron}")
+            razones.append(f"Contexto: {tendencia} | cerca de soporte {soporte:.2f}")
+            return 'Buy', soporte, resistencia, razones
+
+    # Estrella fugaz: debe aparecer en tendencia alcista o cerca de resistencia
+    if "Estrella fugaz" in patron:
+        if tendencia == '📈 ALCISTA' or abs(precio - resistencia) < atr:
+            razones.append(f"Patrón de reversión bajista: {patron}")
+            razones.append(f"Contexto: {tendencia} | cerca de resistencia {resistencia:.2f}")
+            return 'Sell', soporte, resistencia, razones
+
+    # ---- 3. CONFIRMACIÓN DE PATRÓN ANTERIOR (refuerzo) ----
     confirmado = False
     msg_conf = ""
     estado_ant = None
@@ -364,43 +392,40 @@ def motor_v90(estado_actual, df):
             confirmado, msg_conf = confirmar_patron(estado_ant, estado_actual)
             if confirmado:
                 razones.append(msg_conf)
+                # Si el patrón anterior era martillo y se confirma, compramos
+                if "Martillo" in estado_ant['patron'] and estado_actual['close'] > estado_ant['close']:
+                    return 'Buy', soporte, resistencia, razones
+                # Si era estrella fugaz y se confirma, vendemos
+                if "Estrella fugaz" in estado_ant['patron'] and estado_actual['close'] < estado_ant['close']:
+                    return 'Sell', soporte, resistencia, razones
 
-    if confirmado and estado_ant is not None:
-        if "Martillo" in estado_ant['patron'] and abs(precio - soporte) < atr:
-            razones.append("Martillo confirmado en soporte")
-            return 'Buy', soporte, resistencia, razones
-        if "Estrella" in estado_ant['patron'] and abs(precio - resistencia) < atr:
-            razones.append("Estrella fugaz confirmada en resistencia")
-            return 'Sell', soporte, resistencia, razones
-
-    if patron_mult == "tres_soldados_blancos" and tendencia == '📈 ALCISTA' and precio > ema20:
-        razones.append("Tres soldados blancos en tendencia alcista")
-        return 'Buy', soporte, resistencia, razones
-    if patron_mult == "tres_cuervos_negros" and tendencia == '📉 BAJISTA' and precio < ema20:
-        razones.append("Tres cuervos negros en tendencia bajista")
-        return 'Sell', soporte, resistencia, razones
-
-    if (abs(precio - soporte) < atr) and (tendencia == '📈 ALCISTA' or tendencia == '➡️ LATERAL'):
+    # ---- 4. CONDICIONES CLÁSICAS (solo si no hay patrón claro en contra) ----
+    # Cerca de soporte con tendencia alcista/lateral
+    if (abs(precio - soporte) < atr) and (tendencia in ['📈 ALCISTA', '➡️ LATERAL']):
         razones.append(f"Precio cerca de soporte ({soporte:.2f})")
         razones.append("Tendencia alcista o lateral")
         if 'alcista' in patron.lower() or 'martillo' in patron.lower():
             razones.append(f"Patrón de vela: {patron}")
         return 'Buy', soporte, resistencia, razones
 
-    if (abs(precio - resistencia) < atr) and (tendencia == '📉 BAJISTA' or tendencia == '➡️ LATERAL'):
+    # Cerca de resistencia con tendencia bajista/lateral
+    if (abs(precio - resistencia) < atr) and (tendencia in ['📉 BAJISTA', '➡️ LATERAL']):
         razones.append(f"Precio cerca de resistencia ({resistencia:.2f})")
         razones.append("Tendencia bajista o lateral")
         if 'bajista' in patron.lower() or 'estrella fugaz' in patron.lower():
             razones.append(f"Patrón de vela: {patron}")
         return 'Sell', soporte, resistencia, razones
 
+    # EMA actuando como resistencia (precio debajo) – solo si no hay patrón alcista
     if ema_nivel == 'resistencia' and abs(precio - ema20) < atr * 0.5 and tendencia != '📈 ALCISTA':
+        # Si hay martillo, ya lo hemos cubierto arriba, así que no debería llegar aquí con martillo
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde abajo (EMA actúa como resistencia)")
         razones.append("Sin ruptura al alza")
         if 'bajista' in patron.lower() or 'estrella fugaz' in patron.lower():
             razones.append(f"Patrón de vela: {patron}")
         return 'Sell', soporte, resistencia, razones
 
+    # EMA actuando como soporte (precio encima) – solo si no hay patrón bajista
     if ema_nivel == 'soporte' and abs(precio - ema20) < atr * 0.5 and tendencia != '📉 BAJISTA':
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde arriba (EMA actúa como soporte)")
         razones.append("Sin ruptura a la baja")
@@ -408,6 +433,7 @@ def motor_v90(estado_actual, df):
             razones.append(f"Patrón de vela: {patron}")
         return 'Buy', soporte, resistencia, razones
 
+    # Ruptura de EMA20
     if estado_actual['close'] > ema20 and estado_actual['open'] < ema20 and estado_actual['close'] > estado_actual['open']:
         razones.append(f"Ruptura alcista de EMA20 ({ema20:.2f})")
         razones.append(f"Patrón de vela: {patron}")
@@ -601,7 +627,6 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         if precio_salida is not None:
             ax.scatter(entrada_x, precio_salida, s=200, marker='s', color='yellow',
                        edgecolors='black', linewidths=2, label='Salida', zorder=6)
-            # Opcional: línea horizontal hasta el precio de salida
             ax.axhline(precio_salida, color='yellow', linestyle=':', linewidth=1, alpha=0.5)
 
         # Texto informativo
@@ -669,7 +694,7 @@ def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, t
         'size_usd': size_usd,
         'razones': razones,
         'timestamp': tiempo,
-        'estado_entrada': estado.copy()  # guardamos todo el estado de entrada
+        'estado_entrada': estado.copy()
     }
     OPEN_POSITIONS.append(posicion)
     return True
@@ -731,8 +756,6 @@ def paper_revisar_posiciones(precio_actual, df_actual):
         )
         telegram_mensaje(mensaje_cierre)
 
-        # --- GRÁFICO DE CIERRE: usamos el mismo generador que el de entrada ---
-        # Recuperamos los valores de entrada guardados en la posición
         estado_ent = pos['estado_entrada']
         fig = generar_grafico_entrada(
             df=df_actual,
@@ -743,7 +766,7 @@ def paper_revisar_posiciones(precio_actual, df_actual):
             intercept=estado_ent['intercept'],
             razones=pos['razones'],
             estado=estado_ent,
-            precio_salida=precio_actual  # <--- marcador de salida
+            precio_salida=precio_actual
         )
         if fig:
             telegram_grafico(fig)
@@ -754,49 +777,14 @@ def paper_revisar_posiciones(precio_actual, df_actual):
     return len(posiciones_a_cerrar) > 0
 
 # ============================================================
-# HEARTBEAT
+# LOOP PRINCIPAL (SIN HEARTBEAT POR TELEGRAM)
 # ============================================================
 ultimo_heartbeat = 0
 ciclo_count = 0
 
-def enviar_heartbeat(precio, titulo, fuente, sent_label, sent_score):
-    global ultimo_heartbeat, ciclo_count
-    ahora = time.time()
-    if ahora - ultimo_heartbeat >= 300:
-        ciclo_count += 1
-        mensaje = (
-            f"🔄 HEARTBEAT #{ciclo_count} - Bot activo\n"
-            f"📰 Última noticia: {titulo}\n"
-            f"📌 Fuente: {fuente}\n"
-            f"🧠 Sentimiento: {sent_label} (score: {sent_score:.3f})\n"
-            f"💰 Precio BTC: {precio:.2f}\n"
-            f"⏳ Esperando formación de vela...\n"
-            f"📊 Posiciones abiertas: {len(OPEN_POSITIONS)}/{MAX_OPEN_TRADES}"
-        )
-        telegram_mensaje(mensaje)
-        ultimo_heartbeat = ahora
+# <-- ELIMINADA la función enviar_heartbeat (ya no se usa)
 
-# ============================================================
-# LOG EN CONSOLA
-# ============================================================
-def log_estado(estado, decision, razones, filtro_ok, motivo_filtro, num_abiertas):
-    logger.info("="*100)
-    logger.info(f"🕒 {estado['fecha']} | 💰 BTC: {estado['precio']:.2f}")
-    logger.info(f"📐 Tendencia: {estado['tendencia']} | Slope: {estado['slope']:.5f}")
-    logger.info(f"🧱 Soporte: {estado['soporte']:.2f} | Resistencia: {estado['resistencia']:.2f}")
-    logger.info(f"📊 ATR: {estado['atr']:.2f} | EMA20: {estado['ema20']:.2f}")
-    logger.info(f"📏 Patrón: {estado['patron']}")
-    logger.info(f"🎯 Decisión: {decision if decision else 'NO TRADE'}")
-    logger.info(f"🧠 Razones: {', '.join(razones)}")
-    logger.info(f"🔒 Filtro fundamental: {'PERMITIDO' if filtro_ok else 'BLOQUEADO'} - {motivo_filtro}")
-    logger.info(f"📊 Posiciones abiertas: {num_abiertas}/{MAX_OPEN_TRADES}")
-    logger.info("="*100)
-
-# ============================================================
-# LOOP PRINCIPAL
-# ============================================================
 def run_bot():
-    global ultimo_heartbeat
     telegram_mensaje("🤖 BOT V90.3 INICIADO (MEJORADO)\n"
                      f"📊 Velas: {INTERVAL}m | Heartbeat cada 5min | Máx. posiciones: {MAX_OPEN_TRADES}")
     ultima_fecha = None
@@ -822,13 +810,12 @@ def run_bot():
             # 3. Noticias y sentimiento (desde caché)
             titulo, fuente, sent_label, sent_score = obtener_noticias_y_sentimiento()
 
-            # 4. Heartbeat
-            enviar_heartbeat(estado['precio'], titulo, fuente, sent_label, sent_score)
+            # <-- ELIMINADO el envío de heartbeat por Telegram
 
-            # 5. Decisión técnica
+            # 4. Decisión técnica
             decision, soporte, resistencia, razones = motor_v90(estado, df)
 
-            # 6. Filtro fundamental
+            # 5. Filtro fundamental
             filtro_ok = True
             motivo_filtro = "Sin filtro"
             if decision:
@@ -836,11 +823,21 @@ def run_bot():
                 if not filtro_ok:
                     decision = None
 
-            # 7. Log
+            # 6. Log en consola
             num_abiertas = len(OPEN_POSITIONS)
-            log_estado(estado, decision, razones, filtro_ok, motivo_filtro, num_abiertas)
+            logger.info("="*100)
+            logger.info(f"🕒 {estado['fecha']} | 💰 BTC: {estado['precio']:.2f}")
+            logger.info(f"📐 Tendencia: {estado['tendencia']} | Slope: {estado['slope']:.5f}")
+            logger.info(f"🧱 Soporte: {estado['soporte']:.2f} | Resistencia: {estado['resistencia']:.2f}")
+            logger.info(f"📊 ATR: {estado['atr']:.2f} | EMA20: {estado['ema20']:.2f}")
+            logger.info(f"📏 Patrón: {estado['patron']}")
+            logger.info(f"🎯 Decisión: {decision if decision else 'NO TRADE'}")
+            logger.info(f"🧠 Razones: {', '.join(razones)}")
+            logger.info(f"🔒 Filtro fundamental: {'PERMITIDO' if filtro_ok else 'BLOQUEADO'} - {motivo_filtro}")
+            logger.info(f"📊 Posiciones abiertas: {num_abiertas}/{MAX_OPEN_TRADES}")
+            logger.info("="*100)
 
-            # 8. Ejecutar operación
+            # 7. Ejecutar operación
             if decision and num_abiertas < MAX_OPEN_TRADES:
                 apertura = paper_abrir_posicion(
                     decision=decision,
@@ -887,11 +884,11 @@ def run_bot():
                         telegram_grafico(fig)
                         plt.close(fig)
 
-            # 9. Revisar SL/TP y cerrar posiciones (envía gráfico con salida)
+            # 8. Revisar SL/TP y cerrar posiciones (envía gráfico con salida)
             precio_actual = estado['precio']
             paper_revisar_posiciones(precio_actual, df)
 
-            # 10. Reset diario
+            # 9. Reset diario
             fecha_hoy = datetime.now(timezone.utc).date()
             if ultima_fecha is None:
                 ultima_fecha = fecha_hoy
@@ -899,7 +896,7 @@ def run_bot():
                 ultima_fecha = fecha_hoy
                 logger.info("Nuevo día.")
 
-            # 11. Esperar 5 min
+            # 10. Esperar 5 min
             time.sleep(SLEEP_SECONDS)
 
         except Exception as e:
