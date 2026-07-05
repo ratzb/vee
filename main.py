@@ -1,12 +1,11 @@
 # ============================================================
-# BOT TRADING V90.3 – HÍBRIDO DETERMINISTA (SIN IA)
+# BOT TRADING V90.4 – HÍBRIDO DETERMINISTA (SIN IA)
 # ============================================================
 # - Velas de 5 minutos, máximo 3 operaciones abiertas
-# - Heartbeat cada 5 minutos con noticia y sentimiento (desde caché)
-# - Fuente principal: NewsAPI (caché 1 hora)
+# - Fuente principal: NewsAPI (caché 1 hora) + Google RSS
 # - Sentimiento con VADER (léxico, sin IA)
 # - Gráfico con fondo negro, flecha de entrada y marcador de salida
-# - MEJORAS: vela cerrada, patrones multivela, confirmación, SL/TP ajustado
+# - MEJORAS: prioridad de soporte/resistencia, noticias en mensajes
 # - SEGURIDAD EXTREMA: manejo de DataFrames vacíos o con pocas filas
 # ============================================================
 
@@ -42,7 +41,7 @@ SYMBOL = "BTCUSDT"
 INTERVAL = "5"                 # 5 minutos
 RISK_PER_TRADE = 0.0025        # 0.25% del balance por operación
 MAX_OPEN_TRADES = 3            # máximo 3 operaciones abiertas simultáneas
-SLEEP_SECONDS = 300            # 5 minutos (heartbeat y revisión)
+SLEEP_SECONDS = 300            # 5 minutos (revisión)
 
 # Gráficos
 GRAFICO_VELAS_LIMIT = 120
@@ -330,13 +329,15 @@ def confirmar_patron(estado_ant, estado_act):
     return False, ""
 
 # ============================================================
-# MOTOR DE DECISIÓN V90 MEJORADO – PRIORIDAD PARA PATRONES
+# MOTOR DE DECISIÓN V90.4 – PRIORIDAD DE SOPORTE/RESISTENCIA
 # ============================================================
 def motor_v90(estado_actual, df):
     """
-    Nueva lógica: primero se evalúan patrones de reversión (martillo, estrella fugaz)
-    y patrones multivela (tres soldados/cuervos). Si coinciden con el contexto,
-    se devuelve esa señal antes que las condiciones de EMA o soporte/resistencia.
+    Lógica mejorada:
+      - Si estamos en SOPORTE (dist < 0.5*ATR) -> BUY a menos que haya señal bajista fuerte.
+      - Si estamos en RESISTENCIA (dist < 0.5*ATR) -> SELL a menos que haya señal alcista fuerte.
+      - Patrones de reversión y multivela tienen prioridad.
+      - Condiciones de EMA y rupturas como respaldo.
     """
     if estado_actual is None:
         return None, 0, 0, ["Estado nulo"]
@@ -363,22 +364,20 @@ def motor_v90(estado_actual, df):
         razones.append("Tres cuervos negros en tendencia favorable")
         return 'Sell', soporte, resistencia, razones
 
-    # ---- 2. PATRONES DE REVERSIÓN INDIVIDUALES (prioridad alta) ----
-    # Martillo: debe aparecer en tendencia bajista o cerca de soporte
+    # ---- 2. PATRONES DE REVERSIÓN INDIVIDUALES ----
     if "Martillo" in patron:
         if tendencia == '📉 BAJISTA' or abs(precio - soporte) < atr:
             razones.append(f"Patrón de reversión alcista: {patron}")
             razones.append(f"Contexto: {tendencia} | cerca de soporte {soporte:.2f}")
             return 'Buy', soporte, resistencia, razones
 
-    # Estrella fugaz: debe aparecer en tendencia alcista o cerca de resistencia
     if "Estrella fugaz" in patron:
         if tendencia == '📈 ALCISTA' or abs(precio - resistencia) < atr:
             razones.append(f"Patrón de reversión bajista: {patron}")
             razones.append(f"Contexto: {tendencia} | cerca de resistencia {resistencia:.2f}")
             return 'Sell', soporte, resistencia, razones
 
-    # ---- 3. CONFIRMACIÓN DE PATRÓN ANTERIOR (refuerzo) ----
+    # ---- 3. CONFIRMACIÓN DE PATRÓN ANTERIOR ----
     confirmado = False
     msg_conf = ""
     estado_ant = None
@@ -392,56 +391,91 @@ def motor_v90(estado_actual, df):
             confirmado, msg_conf = confirmar_patron(estado_ant, estado_actual)
             if confirmado:
                 razones.append(msg_conf)
-                # Si el patrón anterior era martillo y se confirma, compramos
                 if "Martillo" in estado_ant['patron'] and estado_actual['close'] > estado_ant['close']:
                     return 'Buy', soporte, resistencia, razones
-                # Si era estrella fugaz y se confirma, vendemos
                 if "Estrella fugaz" in estado_ant['patron'] and estado_actual['close'] < estado_ant['close']:
                     return 'Sell', soporte, resistencia, razones
 
-    # ---- 4. CONDICIONES CLÁSICAS (solo si no hay patrón claro en contra) ----
-    # Cerca de soporte con tendencia alcista/lateral
-    if (abs(precio - soporte) < atr) and (tendencia in ['📈 ALCISTA', '➡️ LATERAL']):
-        razones.append(f"Precio cerca de soporte ({soporte:.2f})")
-        razones.append("Tendencia alcista o lateral")
-        if 'alcista' in patron.lower() or 'martillo' in patron.lower():
-            razones.append(f"Patrón de vela: {patron}")
-        return 'Buy', soporte, resistencia, razones
+    # ---- 4. SOPORTE / RESISTENCIA (prioridad alta) ----
+    # Distancia al soporte
+    dist_soporte = abs(precio - soporte)
+    dist_resistencia = abs(precio - resistencia)
 
-    # Cerca de resistencia con tendencia bajista/lateral
-    if (abs(precio - resistencia) < atr) and (tendencia in ['📉 BAJISTA', '➡️ LATERAL']):
-        razones.append(f"Precio cerca de resistencia ({resistencia:.2f})")
-        razones.append("Tendencia bajista o lateral")
-        if 'bajista' in patron.lower() or 'estrella fugaz' in patron.lower():
-            razones.append(f"Patrón de vela: {patron}")
-        return 'Sell', soporte, resistencia, razones
+    # Si estamos muy cerca del soporte (menos de 0.5*ATR)
+    if dist_soporte < 0.5 * atr:
+        # Comprobar si hay señal bajista fuerte que invalide el soporte
+        senal_bajista_fuerte = False
+        if patron == "Vela bajista de cuerpo grande" and estado_actual['close'] < estado_actual['open']:
+            senal_bajista_fuerte = True
+            razones.append("Vela bajista de cuerpo grande en soporte → posible ruptura")
+        if "estrella fugaz" in patron.lower() and estado_actual['close'] < estado_actual['open']:
+            senal_bajista_fuerte = True
+            razones.append("Estrella fugaz en soporte → señal bajista")
+        # Si la tendencia es fuertemente bajista y el precio rompió el soporte (cerrando por debajo)
+        if tendencia == '📉 BAJISTA' and estado_actual['close'] < soporte:
+            senal_bajista_fuerte = True
+            razones.append("Cierre por debajo del soporte → ruptura bajista")
 
-    # EMA actuando como resistencia (precio debajo) – solo si no hay patrón alcista
+        if senal_bajista_fuerte:
+            razones.append("Señal bajista fuerte en soporte → NO COMPRAMOS, podríamos vender si hay continuación")
+            # Podríamos vender solo si hay confirmación de ruptura (cierre claro abajo)
+            if estado_actual['close'] < soporte - 0.3 * atr:
+                razones.append("Ruptura confirmada del soporte → SELL")
+                return 'Sell', soporte, resistencia, razones
+            else:
+                # Si hay señal pero no ruptura, mejor no hacer nada
+                razones.append("Esperar confirmación de ruptura")
+                return None, soporte, resistencia, razones
+        else:
+            razones.append(f"Precio cerca de soporte ({soporte:.2f}) sin señales bajistas fuertes → BUY")
+            razones.append("Objetivo: resistencia más cercana")
+            return 'Buy', soporte, resistencia, razones
+
+    # Si estamos muy cerca de la resistencia (menos de 0.5*ATR)
+    if dist_resistencia < 0.5 * atr:
+        senal_alcista_fuerte = False
+        if patron == "Vela alcista de cuerpo grande" and estado_actual['close'] > estado_actual['open']:
+            senal_alcista_fuerte = True
+            razones.append("Vela alcista de cuerpo grande en resistencia → posible ruptura")
+        if "martillo" in patron.lower() and estado_actual['close'] > estado_actual['open']:
+            senal_alcista_fuerte = True
+            razones.append("Martillo en resistencia → señal alcista")
+        if tendencia == '📈 ALCISTA' and estado_actual['close'] > resistencia:
+            senal_alcista_fuerte = True
+            razones.append("Cierre por encima de resistencia → ruptura alcista")
+
+        if senal_alcista_fuerte:
+            razones.append("Señal alcista fuerte en resistencia → NO VENDEMOS, podríamos comprar si hay ruptura")
+            if estado_actual['close'] > resistencia + 0.3 * atr:
+                razones.append("Ruptura confirmada de resistencia → BUY")
+                return 'Buy', soporte, resistencia, razones
+            else:
+                razones.append("Esperar confirmación de ruptura")
+                return None, soporte, resistencia, razones
+        else:
+            razones.append(f"Precio cerca de resistencia ({resistencia:.2f}) sin señales alcistas fuertes → SELL")
+            razones.append("Objetivo: soporte más cercano")
+            return 'Sell', soporte, resistencia, razones
+
+    # ---- 5. CONDICIONES CLÁSICAS (solo si no estamos cerca de SR) ----
+    # EMA actuando como resistencia (precio debajo)
     if ema_nivel == 'resistencia' and abs(precio - ema20) < atr * 0.5 and tendencia != '📈 ALCISTA':
-        # Si hay martillo, ya lo hemos cubierto arriba, así que no debería llegar aquí con martillo
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde abajo (EMA actúa como resistencia)")
         razones.append("Sin ruptura al alza")
-        if 'bajista' in patron.lower() or 'estrella fugaz' in patron.lower():
-            razones.append(f"Patrón de vela: {patron}")
         return 'Sell', soporte, resistencia, razones
 
-    # EMA actuando como soporte (precio encima) – solo si no hay patrón bajista
     if ema_nivel == 'soporte' and abs(precio - ema20) < atr * 0.5 and tendencia != '📉 BAJISTA':
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde arriba (EMA actúa como soporte)")
         razones.append("Sin ruptura a la baja")
-        if 'alcista' in patron.lower() or 'martillo' in patron.lower():
-            razones.append(f"Patrón de vela: {patron}")
         return 'Buy', soporte, resistencia, razones
 
     # Ruptura de EMA20
     if estado_actual['close'] > ema20 and estado_actual['open'] < ema20 and estado_actual['close'] > estado_actual['open']:
         razones.append(f"Ruptura alcista de EMA20 ({ema20:.2f})")
-        razones.append(f"Patrón de vela: {patron}")
         return 'Buy', soporte, resistencia, razones
 
     if estado_actual['close'] < ema20 and estado_actual['open'] > ema20 and estado_actual['close'] < estado_actual['open']:
         razones.append(f"Ruptura bajista de EMA20 ({ema20:.2f})")
-        razones.append(f"Patrón de vela: {patron}")
         return 'Sell', soporte, resistencia, razones
 
     razones.append("Sin confluencia válida")
@@ -549,11 +583,45 @@ def obtener_noticias_y_sentimiento():
         NEWS_CACHE["sent_score"]
     )
 
-def filtrar_por_fundamental(decision, sent_label):
-    if sent_label == 'Bearish' and decision == 'Buy':
-        return False, f"Noticias bajistas → bloqueo LONG"
-    if sent_label == 'Bullish' and decision == 'Sell':
-        return False, f"Noticias alcistas → bloqueo SHORT"
+# ============================================================
+# FILTRO FUNDAMENTAL MEJORADO (menos restrictivo en zonas clave)
+# ============================================================
+def filtrar_por_fundamental(decision, sent_label, estado):
+    """
+    Ahora, si la decisión es BUY y estamos en soporte, permitimos aunque sentimiento sea Bearish.
+    Si es SELL y estamos en resistencia, permitimos aunque sea Bullish.
+    Solo bloqueamos si la decisión va en contra de la zona y el sentimiento es opuesto.
+    """
+    if decision is None:
+        return True, "Sin decisión"
+
+    precio = estado['precio']
+    soporte = estado['soporte']
+    resistencia = estado['resistencia']
+    atr = estado['atr']
+
+    dist_soporte = abs(precio - soporte)
+    dist_resistencia = abs(precio - resistencia)
+    en_soporte = dist_soporte < 0.5 * atr
+    en_resistencia = dist_resistencia < 0.5 * atr
+
+    # Si es BUY y sentimiento Bearish
+    if decision == 'Buy' and sent_label == 'Bearish':
+        if en_soporte:
+            # Permitir porque el soporte es más importante
+            return True, f"BUY en soporte a pesar de sentimiento bajista (soporte {soporte:.2f})"
+        else:
+            # Si no está en soporte, bloquear
+            return False, f"Sentimiento bajista bloquea BUY (no está en soporte)"
+    
+    # Si es SELL y sentimiento Bullish
+    if decision == 'Sell' and sent_label == 'Bullish':
+        if en_resistencia:
+            return True, f"SELL en resistencia a pesar de sentimiento alcista (resistencia {resistencia:.2f})"
+        else:
+            return False, f"Sentimiento alcista bloquea SELL (no está en resistencia)"
+
+    # Resto de casos: permitir
     return True, f"Sentimiento permitido ({sent_label})"
 
 # ============================================================
@@ -705,7 +773,7 @@ def paper_calcular_pnl(posicion, precio_actual):
     else:
         return (posicion['entry_price'] - precio_actual) * posicion['size_btc']
 
-def paper_revisar_posiciones(precio_actual, df_actual):
+def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_fuente, sent_label, sent_score):
     global PAPER_BALANCE, PAPER_PNL_GLOBAL, PAPER_WIN, PAPER_LOSS, PAPER_TRADES_TOTALES
     global PAPER_BALANCE_MAX, PAPER_MAX_DRAWDOWN, OPEN_POSITIONS
 
@@ -752,7 +820,9 @@ def paper_revisar_posiciones(precio_actual, df_actual):
             f"📊 PnL Global: {PAPER_PNL_GLOBAL:.4f} USD\n"
             f"🏆 Wins: {PAPER_WIN} | ❌ Loss: {PAPER_LOSS}\n"
             f"📉 Max Drawdown: {PAPER_MAX_DRAWDOWN:.4f} USD\n"
-            f"🧠 Razones: {', '.join(pos['razones'])}"
+            f"🧠 Razones: {', '.join(pos['razones'])}\n"
+            f"📰 Noticia: {noticia_titulo}\n"
+            f"📌 Fuente: {noticia_fuente} | Sentimiento: {sent_label} (score: {sent_score:.3f})"
         )
         telegram_mensaje(mensaje_cierre)
 
@@ -777,16 +847,12 @@ def paper_revisar_posiciones(precio_actual, df_actual):
     return len(posiciones_a_cerrar) > 0
 
 # ============================================================
-# LOOP PRINCIPAL (SIN HEARTBEAT POR TELEGRAM)
+# LOOP PRINCIPAL (SIN HEARTBEAT)
 # ============================================================
-ultimo_heartbeat = 0
-ciclo_count = 0
-
-# <-- ELIMINADA la función enviar_heartbeat (ya no se usa)
-
 def run_bot():
-    telegram_mensaje("🤖 BOT V90.3 INICIADO (MEJORADO)\n"
-                     f"📊 Velas: {INTERVAL}m | Heartbeat cada 5min | Máx. posiciones: {MAX_OPEN_TRADES}")
+    telegram_mensaje("🤖 BOT V90.4 INICIADO (MEJORADO)\n"
+                     f"📊 Velas: {INTERVAL}m | Máx. posiciones: {MAX_OPEN_TRADES}\n"
+                     "📈 Prioridad: Soporte → BUY, Resistencia → SELL")
     ultima_fecha = None
 
     while True:
@@ -796,11 +862,11 @@ def run_bot():
             df = calcular_indicadores(df)
 
             if df.empty:
-                logger.warning("⚠️ DataFrame vacío después de indicadores. Saltando ciclo...")
+                logger.warning("⚠️ DataFrame vacío. Saltando ciclo...")
                 time.sleep(SLEEP_SECONDS)
                 continue
 
-            # 2. Extraer estado usando la última vela cerrada (si es posible)
+            # 2. Extraer estado usando la última vela cerrada
             estado = extraer_estado_mercado(df, usar_cerrada=True)
             if estado is None:
                 logger.warning("⚠️ Estado nulo. Saltando ciclo...")
@@ -810,31 +876,30 @@ def run_bot():
             # 3. Noticias y sentimiento (desde caché)
             titulo, fuente, sent_label, sent_score = obtener_noticias_y_sentimiento()
 
-            # <-- ELIMINADO el envío de heartbeat por Telegram
-
             # 4. Decisión técnica
             decision, soporte, resistencia, razones = motor_v90(estado, df)
 
-            # 5. Filtro fundamental
+            # 5. Filtro fundamental mejorado (tiene en cuenta zona)
             filtro_ok = True
             motivo_filtro = "Sin filtro"
             if decision:
-                filtro_ok, motivo_filtro = filtrar_por_fundamental(decision, sent_label)
+                filtro_ok, motivo_filtro = filtrar_por_fundamental(decision, sent_label, estado)
                 if not filtro_ok:
                     decision = None
 
-            # 6. Log en consola
+            # 6. Log en consola (incluye noticia)
             num_abiertas = len(OPEN_POSITIONS)
             logger.info("="*100)
             logger.info(f"🕒 {estado['fecha']} | 💰 BTC: {estado['precio']:.2f}")
             logger.info(f"📐 Tendencia: {estado['tendencia']} | Slope: {estado['slope']:.5f}")
-            logger.info(f"🧱 Soporte: {estado['soporte']:.2f} | Resistencia: {estado['resistencia']:.2f}")
+            logger.info(f"🧱 Soporte: {soporte:.2f} | Resistencia: {resistencia:.2f}")
             logger.info(f"📊 ATR: {estado['atr']:.2f} | EMA20: {estado['ema20']:.2f}")
             logger.info(f"📏 Patrón: {estado['patron']}")
             logger.info(f"🎯 Decisión: {decision if decision else 'NO TRADE'}")
             logger.info(f"🧠 Razones: {', '.join(razones)}")
             logger.info(f"🔒 Filtro fundamental: {'PERMITIDO' if filtro_ok else 'BLOQUEADO'} - {motivo_filtro}")
             logger.info(f"📊 Posiciones abiertas: {num_abiertas}/{MAX_OPEN_TRADES}")
+            logger.info(f"📰 Noticia: {titulo} (Fuente: {fuente}) | Sentimiento: {sent_label} ({sent_score:.3f})")
             logger.info("="*100)
 
             # 7. Ejecutar operación
@@ -866,7 +931,9 @@ def run_bot():
                         f"🧱 Soporte: {soporte:.2f} | Resistencia: {resistencia:.2f}\n"
                         f"📉 EMA20: {estado['ema20']:.2f} (actúa como {estado['ema_nivel']})\n"
                         f"🔒 Filtro fundamental: {motivo_filtro}\n"
-                        f"📊 Posiciones abiertas: {len(OPEN_POSITIONS)}/{MAX_OPEN_TRADES}"
+                        f"📊 Posiciones abiertas: {len(OPEN_POSITIONS)}/{MAX_OPEN_TRADES}\n"
+                        f"📰 Noticia: {titulo}\n"
+                        f"📌 Fuente: {fuente} | Sentimiento: {sent_label} (score: {sent_score:.3f})"
                     )
                     telegram_mensaje(mensaje_entrada)
 
@@ -884,9 +951,9 @@ def run_bot():
                         telegram_grafico(fig)
                         plt.close(fig)
 
-            # 8. Revisar SL/TP y cerrar posiciones (envía gráfico con salida)
+            # 8. Revisar SL/TP y cerrar posiciones (envía gráfico con salida y noticia)
             precio_actual = estado['precio']
-            paper_revisar_posiciones(precio_actual, df)
+            paper_revisar_posiciones(precio_actual, df, titulo, fuente, sent_label, sent_score)
 
             # 9. Reset diario
             fecha_hoy = datetime.now(timezone.utc).date()
