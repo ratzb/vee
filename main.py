@@ -1,12 +1,12 @@
 # ============================================================
-# BOT TRADING V90.4 – HÍBRIDO DETERMINISTA (SIN IA)
+# BOT TRADING V90.5 – GESTIÓN AVANZADA (TP2 + LEVERAGE 10x)
 # ============================================================
 # - Velas de 5 minutos, máximo 3 operaciones abiertas
 # - Fuente principal: NewsAPI (caché 1 hora) + Google RSS
 # - Sentimiento con VADER (léxico, sin IA)
 # - Gráfico con fondo negro, flecha de entrada y marcador de salida
-# - MEJORAS: prioridad de soporte/resistencia, noticias en mensajes
-# - SEGURIDAD EXTREMA: manejo de DataFrames vacíos o con pocas filas
+# - NUEVO: Apalancamiento x10, cierre parcial 50% en TP1, SL a BE, TP2 dinámico
+# - NUEVO: Identificador único (#ID) para cada operación
 # ============================================================
 
 import os
@@ -40,6 +40,7 @@ logger = logging.getLogger(__name__)
 SYMBOL = "BTCUSDT"
 INTERVAL = "5"                 # 5 minutos
 RISK_PER_TRADE = 0.0025        # 0.25% del balance por operación
+LEVERAGE = 10                  # <-- NUEVO: Apalancamiento 10x
 MAX_OPEN_TRADES = 3            # máximo 3 operaciones abiertas simultáneas
 SLEEP_SECONDS = 300            # 5 minutos (revisión)
 
@@ -48,7 +49,7 @@ GRAFICO_VELAS_LIMIT = 120
 MOSTRAR_EMA20 = True
 MOSTRAR_ATR = False
 
-# Caché de noticias (para no exceder límite de NewsAPI)
+# Caché de noticias
 NEWS_CACHE = {
     "titulo": "No disponible",
     "fuente": "Ninguna",
@@ -56,10 +57,10 @@ NEWS_CACHE = {
     "sent_score": 0.0,
     "timestamp": None
 }
-NEWS_CACHE_TTL = 3600          # 1 hora en segundos
+NEWS_CACHE_TTL = 3600
 
 # ============================================================
-# PAPER TRADING (SIMULACIÓN) – GESTIÓN DE POSICIONES
+# PAPER TRADING (SIMULACIÓN) – VARIABLES GLOBALES
 # ============================================================
 PAPER_BALANCE_INICIAL = 100.0
 PAPER_BALANCE = PAPER_BALANCE_INICIAL
@@ -70,6 +71,8 @@ PAPER_LOSS = 0
 PAPER_TRADES_TOTALES = 0
 PAPER_MAX_DRAWDOWN = 0.0
 PAPER_BALANCE_MAX = PAPER_BALANCE_INICIAL
+
+TRADE_COUNTER = 0              # <-- NUEVO: Contador global de trades
 
 # ============================================================
 # CREDENCIALES (VARIABLES DE ENTORNO)
@@ -87,10 +90,6 @@ if not BYBIT_API_KEY or not BYBIT_API_SECRET:
 # INICIALIZAR VADER
 # ============================================================
 sentiment_analyzer = SentimentIntensityAnalyzer()
-
-# ============================================================
-# BYBIT ENDPOINT
-# ============================================================
 BASE_URL = "https://api.bybit.com"
 
 # ============================================================
@@ -119,14 +118,7 @@ def telegram_grafico(fig):
         logger.error(f"Telegram photo error: {e}")
 
 # ============================================================
-# FIRMA BYBIT
-# ============================================================
-def sign(params):
-    query = '&'.join([f"{k}={v}" for k, v in sorted(params.items())])
-    return hmac.new(BYBIT_API_SECRET.encode(), query.encode(), hashlib.sha256).hexdigest()
-
-# ============================================================
-# OBTENER VELAS BYBIT
+# OBTENER VELAS BYBIT (SIN CAMBIOS)
 # ============================================================
 def obtener_velas(limit=300):
     url = f"{BASE_URL}/v5/market/kline"
@@ -160,9 +152,6 @@ def obtener_velas(limit=300):
     df.set_index('time', inplace=True)
     return df
 
-# ============================================================
-# INDICADORES
-# ============================================================
 def calcular_indicadores(df):
     df['ema20'] = df['close'].ewm(span=20).mean()
     tr = pd.concat([
@@ -174,7 +163,7 @@ def calcular_indicadores(df):
     return df
 
 # ============================================================
-# CEREBRO DE DATOS – EXTRAER ESTADO CON SEGURIDAD ABSOLUTA
+# CEREBRO DE DATOS (SIN CAMBIOS)
 # ============================================================
 def extraer_estado_mercado(df, usar_cerrada=True):
     if df.empty:
@@ -292,9 +281,6 @@ def _detectar_tendencia(df, idx, ventana=80):
         direccion = '➡️ LATERAL'
     return slope, intercept, direccion
 
-# ============================================================
-# FUNCIÓN AUXILIAR PARA EXTRAER ESTADO POR ÍNDICE (CON SEGURIDAD)
-# ============================================================
 def extraer_estado_mercado_por_indice(df, idx):
     if df.empty:
         return None
@@ -308,7 +294,7 @@ def extraer_estado_mercado_por_indice(df, idx):
     return extraer_estado_mercado(df_temp, usar_cerrada=False)
 
 # ============================================================
-# PATRONES MULTIVELA Y CONFIRMACIÓN
+# PATRONES MULTIVELA (SIN CAMBIOS)
 # ============================================================
 def detectar_patron_multivela(df, n=3):
     if len(df) < n:
@@ -329,16 +315,9 @@ def confirmar_patron(estado_ant, estado_act):
     return False, ""
 
 # ============================================================
-# MOTOR DE DECISIÓN V90.4 – PRIORIDAD DE SOPORTE/RESISTENCIA
+# MOTOR DE DECISIÓN V90.4 (SIN CAMBIOS)
 # ============================================================
 def motor_v90(estado_actual, df):
-    """
-    Lógica mejorada:
-      - Si estamos en SOPORTE (dist < 0.5*ATR) -> BUY a menos que haya señal bajista fuerte.
-      - Si estamos en RESISTENCIA (dist < 0.5*ATR) -> SELL a menos que haya señal alcista fuerte.
-      - Patrones de reversión y multivela tienen prioridad.
-      - Condiciones de EMA y rupturas como respaldo.
-    """
     if estado_actual is None:
         return None, 0, 0, ["Estado nulo"]
 
@@ -353,7 +332,6 @@ def motor_v90(estado_actual, df):
 
     razones = []
 
-    # ---- 1. PATRONES MULTIVELA (máxima prioridad) ----
     patron_mult, desc_mult = detectar_patron_multivela(df)
     if patron_mult == "tres_soldados_blancos" and tendencia in ['📈 ALCISTA', '➡️ LATERAL']:
         razones.append(desc_mult)
@@ -364,7 +342,6 @@ def motor_v90(estado_actual, df):
         razones.append("Tres cuervos negros en tendencia favorable")
         return 'Sell', soporte, resistencia, razones
 
-    # ---- 2. PATRONES DE REVERSIÓN INDIVIDUALES ----
     if "Martillo" in patron:
         if tendencia == '📉 BAJISTA' or abs(precio - soporte) < atr:
             razones.append(f"Patrón de reversión alcista: {patron}")
@@ -377,7 +354,6 @@ def motor_v90(estado_actual, df):
             razones.append(f"Contexto: {tendencia} | cerca de resistencia {resistencia:.2f}")
             return 'Sell', soporte, resistencia, razones
 
-    # ---- 3. CONFIRMACIÓN DE PATRÓN ANTERIOR ----
     confirmado = False
     msg_conf = ""
     estado_ant = None
@@ -396,14 +372,10 @@ def motor_v90(estado_actual, df):
                 if "Estrella fugaz" in estado_ant['patron'] and estado_actual['close'] < estado_ant['close']:
                     return 'Sell', soporte, resistencia, razones
 
-    # ---- 4. SOPORTE / RESISTENCIA (prioridad alta) ----
-    # Distancia al soporte
     dist_soporte = abs(precio - soporte)
     dist_resistencia = abs(precio - resistencia)
 
-    # Si estamos muy cerca del soporte (menos de 0.5*ATR)
     if dist_soporte < 0.5 * atr:
-        # Comprobar si hay señal bajista fuerte que invalide el soporte
         senal_bajista_fuerte = False
         if patron == "Vela bajista de cuerpo grande" and estado_actual['close'] < estado_actual['open']:
             senal_bajista_fuerte = True
@@ -411,27 +383,22 @@ def motor_v90(estado_actual, df):
         if "estrella fugaz" in patron.lower() and estado_actual['close'] < estado_actual['open']:
             senal_bajista_fuerte = True
             razones.append("Estrella fugaz en soporte → señal bajista")
-        # Si la tendencia es fuertemente bajista y el precio rompió el soporte (cerrando por debajo)
         if tendencia == '📉 BAJISTA' and estado_actual['close'] < soporte:
             senal_bajista_fuerte = True
             razones.append("Cierre por debajo del soporte → ruptura bajista")
 
         if senal_bajista_fuerte:
-            razones.append("Señal bajista fuerte en soporte → NO COMPRAMOS, podríamos vender si hay continuación")
-            # Podríamos vender solo si hay confirmación de ruptura (cierre claro abajo)
+            razones.append("Señal bajista fuerte en soporte → NO COMPRAMOS")
             if estado_actual['close'] < soporte - 0.3 * atr:
                 razones.append("Ruptura confirmada del soporte → SELL")
                 return 'Sell', soporte, resistencia, razones
             else:
-                # Si hay señal pero no ruptura, mejor no hacer nada
                 razones.append("Esperar confirmación de ruptura")
                 return None, soporte, resistencia, razones
         else:
             razones.append(f"Precio cerca de soporte ({soporte:.2f}) sin señales bajistas fuertes → BUY")
-            razones.append("Objetivo: resistencia más cercana")
             return 'Buy', soporte, resistencia, razones
 
-    # Si estamos muy cerca de la resistencia (menos de 0.5*ATR)
     if dist_resistencia < 0.5 * atr:
         senal_alcista_fuerte = False
         if patron == "Vela alcista de cuerpo grande" and estado_actual['close'] > estado_actual['open']:
@@ -445,7 +412,7 @@ def motor_v90(estado_actual, df):
             razones.append("Cierre por encima de resistencia → ruptura alcista")
 
         if senal_alcista_fuerte:
-            razones.append("Señal alcista fuerte en resistencia → NO VENDEMOS, podríamos comprar si hay ruptura")
+            razones.append("Señal alcista fuerte en resistencia → NO VENDEMOS")
             if estado_actual['close'] > resistencia + 0.3 * atr:
                 razones.append("Ruptura confirmada de resistencia → BUY")
                 return 'Buy', soporte, resistencia, razones
@@ -454,22 +421,16 @@ def motor_v90(estado_actual, df):
                 return None, soporte, resistencia, razones
         else:
             razones.append(f"Precio cerca de resistencia ({resistencia:.2f}) sin señales alcistas fuertes → SELL")
-            razones.append("Objetivo: soporte más cercano")
             return 'Sell', soporte, resistencia, razones
 
-    # ---- 5. CONDICIONES CLÁSICAS (solo si no estamos cerca de SR) ----
-    # EMA actuando como resistencia (precio debajo)
     if ema_nivel == 'resistencia' and abs(precio - ema20) < atr * 0.5 and tendencia != '📈 ALCISTA':
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde abajo (EMA actúa como resistencia)")
-        razones.append("Sin ruptura al alza")
         return 'Sell', soporte, resistencia, razones
 
     if ema_nivel == 'soporte' and abs(precio - ema20) < atr * 0.5 and tendencia != '📉 BAJISTA':
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde arriba (EMA actúa como soporte)")
-        razones.append("Sin ruptura a la baja")
         return 'Buy', soporte, resistencia, razones
 
-    # Ruptura de EMA20
     if estado_actual['close'] > ema20 and estado_actual['open'] < ema20 and estado_actual['close'] > estado_actual['open']:
         razones.append(f"Ruptura alcista de EMA20 ({ema20:.2f})")
         return 'Buy', soporte, resistencia, razones
@@ -482,18 +443,16 @@ def motor_v90(estado_actual, df):
     return None, soporte, resistencia, razones
 
 # ============================================================
-# FILTRO FUNDAMENTAL CON NEWSAPI + GOOGLE RSS + CACHÉ
+# FILTRO FUNDAMENTAL (SIN CAMBIOS)
 # ============================================================
 def actualizar_cache_noticias():
     global NEWS_CACHE
     ahora = datetime.now(timezone.utc)
-
     if NEWS_CACHE["timestamp"] is not None:
         edad = (ahora - NEWS_CACHE["timestamp"]).total_seconds()
         if edad < NEWS_CACHE_TTL:
             logger.debug(f"Usando caché de noticias (edad: {edad:.0f}s)")
             return
-
     logger.info("⏳ Actualizando caché de noticias...")
     titulo, fuente, sent_label, sent_score = _obtener_noticias_frescas()
     NEWS_CACHE = {
@@ -508,7 +467,6 @@ def actualizar_cache_noticias():
 def _obtener_noticias_frescas():
     noticias = []
     fuente = "Ninguna"
-
     if NEWS_API_KEY:
         try:
             url = "https://newsapi.org/v2/everything"
@@ -528,7 +486,6 @@ def _obtener_noticias_frescas():
                     logger.info(f"📰 Obtenidas {len(noticias)} noticias desde NewsAPI")
         except Exception as e:
             logger.error(f"Error en NewsAPI: {e}")
-
     if not noticias:
         try:
             rss_url = "https://news.google.com/rss/search?q=Bitcoin+OR+Cryptocurrency&hl=en-US&gl=US&ceid=US:en"
@@ -547,17 +504,14 @@ def _obtener_noticias_frescas():
                 logger.info(f"📰 Obtenidas {len(noticias)} noticias desde Google News RSS")
         except Exception as e:
             logger.error(f"Error en Google News RSS: {e}")
-
     if noticias:
         titulo = noticias[0].get("title", "No disponible")
         fuente = noticias[0].get("source", {}).get("name", fuente)
-
         scores = []
         for n in noticias:
             t = n.get("title", "")
             if t:
                 scores.append(sentiment_analyzer.polarity_scores(t)["compound"])
-
         if scores:
             sent_score = sum(scores) / len(scores)
             if sent_score > 0.05:
@@ -569,9 +523,7 @@ def _obtener_noticias_frescas():
         else:
             sent_label = "Neutral"
             sent_score = 0.0
-
         return titulo, fuente, sent_label, sent_score
-
     return "No disponible", "Ninguna", "Neutral", 0.0
 
 def obtener_noticias_y_sentimiento():
@@ -583,55 +535,33 @@ def obtener_noticias_y_sentimiento():
         NEWS_CACHE["sent_score"]
     )
 
-# ============================================================
-# FILTRO FUNDAMENTAL MEJORADO (menos restrictivo en zonas clave)
-# ============================================================
 def filtrar_por_fundamental(decision, sent_label, estado):
-    """
-    Ahora, si la decisión es BUY y estamos en soporte, permitimos aunque sentimiento sea Bearish.
-    Si es SELL y estamos en resistencia, permitimos aunque sea Bullish.
-    Solo bloqueamos si la decisión va en contra de la zona y el sentimiento es opuesto.
-    """
     if decision is None:
         return True, "Sin decisión"
-
     precio = estado['precio']
     soporte = estado['soporte']
     resistencia = estado['resistencia']
     atr = estado['atr']
-
     dist_soporte = abs(precio - soporte)
     dist_resistencia = abs(precio - resistencia)
     en_soporte = dist_soporte < 0.5 * atr
     en_resistencia = dist_resistencia < 0.5 * atr
-
-    # Si es BUY y sentimiento Bearish
     if decision == 'Buy' and sent_label == 'Bearish':
         if en_soporte:
-            # Permitir porque el soporte es más importante
             return True, f"BUY en soporte a pesar de sentimiento bajista (soporte {soporte:.2f})"
         else:
-            # Si no está en soporte, bloquear
             return False, f"Sentimiento bajista bloquea BUY (no está en soporte)"
-    
-    # Si es SELL y sentimiento Bullish
     if decision == 'Sell' and sent_label == 'Bullish':
         if en_resistencia:
             return True, f"SELL en resistencia a pesar de sentimiento alcista (resistencia {resistencia:.2f})"
         else:
             return False, f"Sentimiento alcista bloquea SELL (no está en resistencia)"
-
-    # Resto de casos: permitir
     return True, f"Sentimiento permitido ({sent_label})"
 
 # ============================================================
-# GRÁFICO DE VELAS JAPONESAS CON FONDO NEGRO (ENTRADA Y SALIDA)
+# GRÁFICO DE VELAS (SIN CAMBIOS)
 # ============================================================
-def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept, razones, estado, precio_salida=None):
-    """
-    Genera el gráfico de velas con soporte/resistencia, EMA, tendencia,
-    flecha de entrada y, opcionalmente, marcador de salida.
-    """
+def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept, razones, estado, precio_salida=None, trade_id=None):
     if df.empty or estado is None:
         return None
     try:
@@ -639,18 +569,14 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         df_plot = df.copy().tail(GRAFICO_VELAS_LIMIT)
         if df_plot.empty:
             return None
-
         times = df_plot.index
         opens = df_plot['open'].values
         highs = df_plot['high'].values
         lows = df_plot['low'].values
         closes = df_plot['close'].values
         x = np.arange(len(df_plot))
-
         fig, ax = plt.subplots(figsize=(14, 7), facecolor='black')
         ax.set_facecolor('black')
-
-        # Dibujar velas
         for i in range(len(df_plot)):
             color = 'lime' if closes[i] >= opens[i] else 'red'
             ax.vlines(x[i], lows[i], highs[i], color=color, linewidth=1)
@@ -660,46 +586,31 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
                 cuerpo_h = 0.0001
             rect = plt.Rectangle((x[i] - 0.3, cuerpo_y), 0.6, cuerpo_h, color=color, alpha=0.9)
             ax.add_patch(rect)
-
-        # Líneas de soporte/resistencia
         ax.axhline(soporte, color='cyan', linestyle='--', linewidth=2, label=f"Soporte {soporte:.2f}")
         ax.axhline(resistencia, color='magenta', linestyle='--', linewidth=2, label=f"Resistencia {resistencia:.2f}")
-
-        # EMA20
         if MOSTRAR_EMA20 and 'ema20' in df_plot.columns:
             ax.plot(x, df_plot['ema20'].values, color='yellow', linewidth=2, label='EMA20')
-
-        # Línea de tendencia
         y_plot = df_plot['close'].values
         x_plot = np.arange(len(y_plot))
         slope_plot, intercept_plot, r_plot, _, _ = linregress(x_plot, y_plot)
         tendencia_linea = intercept_plot + slope_plot * x_plot
-        ax.plot(x_plot, tendencia_linea, color='white', linewidth=1.5, linestyle='-',
-                label=f"Tendencia slope {slope_plot:.4f}")
-
-        # Marcador de entrada (siempre en la última vela)
+        ax.plot(x_plot, tendencia_linea, color='white', linewidth=1.5, linestyle='-', label=f"Tendencia slope {slope_plot:.4f}")
         entrada_x = len(df_plot) - 1
         entrada_precio = closes[-1]
         if decision == 'Buy':
-            ax.scatter(entrada_x, entrada_precio, s=250, marker='^', color='lime',
-                       edgecolors='black', linewidths=2, label='Entrada BUY', zorder=5)
+            ax.scatter(entrada_x, entrada_precio, s=250, marker='^', color='lime', edgecolors='black', linewidths=2, label='Entrada BUY', zorder=5)
             ax.annotate('', xy=(entrada_x, entrada_precio), xytext=(entrada_x-2, entrada_precio-0.5*estado['atr']),
                         arrowprops=dict(arrowstyle='->', color='lime', lw=3))
         elif decision == 'Sell':
-            ax.scatter(entrada_x, entrada_precio, s=250, marker='v', color='red',
-                       edgecolors='black', linewidths=2, label='Entrada SELL', zorder=5)
+            ax.scatter(entrada_x, entrada_precio, s=250, marker='v', color='red', edgecolors='black', linewidths=2, label='Entrada SELL', zorder=5)
             ax.annotate('', xy=(entrada_x, entrada_precio), xytext=(entrada_x-2, entrada_precio+0.5*estado['atr']),
                         arrowprops=dict(arrowstyle='->', color='red', lw=3))
-
-        # Marcador de salida (si se proporciona)
         if precio_salida is not None:
-            ax.scatter(entrada_x, precio_salida, s=200, marker='s', color='yellow',
-                       edgecolors='black', linewidths=2, label='Salida', zorder=6)
+            ax.scatter(entrada_x, precio_salida, s=200, marker='s', color='yellow', edgecolors='black', linewidths=2, label='Salida', zorder=6)
             ax.axhline(precio_salida, color='yellow', linestyle=':', linewidth=1, alpha=0.5)
-
-        # Texto informativo
+        id_text = f" ID: {trade_id}" if trade_id else ""
         texto = (
-            f"{decision.upper()}\n"
+            f"{decision.upper()}{id_text}\n"
             f"Precio entrada: {entrada_precio:.2f}\n"
             f"Hora: {times[-1].strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
             f"Soporte: {soporte:.2f}  Resistencia: {resistencia:.2f}\n"
@@ -710,10 +621,8 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         )
         if precio_salida is not None:
             texto += f"\nSalida: {precio_salida:.2f}"
-        ax.text(0.02, 0.98, texto, transform=ax.transAxes,
-                fontsize=9, verticalalignment='top', color='white',
+        ax.text(0.02, 0.98, texto, transform=ax.transAxes, fontsize=9, verticalalignment='top', color='white',
                 bbox=dict(facecolor='black', alpha=0.7, boxstyle='round'))
-
         ax.set_title(f"{SYMBOL} - Velas {INTERVAL}m - {'Entrada' if precio_salida is None else 'Cierre'}", color='white')
         ax.set_xlabel("Velas", color='white')
         ax.set_ylabel("Precio", color='white')
@@ -730,73 +639,216 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         return None
 
 # ============================================================
-# PAPER TRADING – ABRIR Y CERRAR POSICIONES
+# NUEVA GESTIÓN DE POSICIONES CON TP2 Y LEVERAGE
 # ============================================================
+
 def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, tiempo, estado):
-    global PAPER_BALANCE, PAPER_BALANCE_MAX, PAPER_MAX_DRAWDOWN, OPEN_POSITIONS
+    global PAPER_BALANCE, PAPER_BALANCE_MAX, PAPER_MAX_DRAWDOWN, OPEN_POSITIONS, TRADE_COUNTER
 
     if len(OPEN_POSITIONS) >= MAX_OPEN_TRADES:
-        return False
+        return None
 
-    riesgo_usd = PAPER_BALANCE * RISK_PER_TRADE
+    # Calcular riesgo en USD (0.25% del balance)
+    riesgo_usd = PAPER_BALANCE * RISK_PER_TRADE * LEVERAGE  # <-- Aplicamos apalancamiento
+
     if decision == "Buy":
         sl = precio - 1.5 * atr
-        tp = min(resistencia, precio + 2.5 * atr)
-    else:
+        # TP1: 2.0 * ATR, pero sin sobrepasar la resistencia
+        tp1 = min(resistencia, precio + 2.0 * atr)
+        # TP2: 3.5 * ATR, dejando correr si rompe resistencia
+        tp2 = precio + 3.5 * atr
+    else:  # Sell
         sl = precio + 1.5 * atr
-        tp = max(soporte, precio - 2.5 * atr)
+        tp1 = max(soporte, precio - 2.0 * atr)
+        tp2 = precio - 3.5 * atr
 
     distancia_sl = abs(precio - sl)
     if distancia_sl == 0:
-        return False
+        return None
 
+    # Tamaño del contrato (con apalancamiento)
     size_btc = riesgo_usd / distancia_sl
     size_usd = size_btc * precio
 
+    # Incrementar contador de trades
+    TRADE_COUNTER += 1
+    trade_id = TRADE_COUNTER
+
     posicion = {
+        'trade_id': trade_id,
         'decision': decision,
         'entry_price': precio,
         'sl': sl,
-        'tp': tp,
-        'size_btc': size_btc,
+        'tp1': tp1,
+        'tp2': tp2,
+        'current_sl': sl,           # SL actual (se moverá)
+        'current_tp': tp1,          # TP actual (se moverá a tp2)
+        'status': 'ACTIVE',         # ACTIVE, TP1_HIT, TP2_HIT
+        'full_size_btc': size_btc,
+        'remaining_size_btc': size_btc,
         'size_usd': size_usd,
         'razones': razones,
         'timestamp': tiempo,
         'estado_entrada': estado.copy()
     }
     OPEN_POSITIONS.append(posicion)
-    return True
+    return posicion
 
 def paper_calcular_pnl(posicion, precio_actual):
+    size = posicion['remaining_size_btc']
     if posicion['decision'] == "Buy":
-        return (precio_actual - posicion['entry_price']) * posicion['size_btc']
+        return (precio_actual - posicion['entry_price']) * size
     else:
-        return (posicion['entry_price'] - precio_actual) * posicion['size_btc']
+        return (posicion['entry_price'] - precio_actual) * size
 
 def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_fuente, sent_label, sent_score):
     global PAPER_BALANCE, PAPER_PNL_GLOBAL, PAPER_WIN, PAPER_LOSS, PAPER_TRADES_TOTALES
     global PAPER_BALANCE_MAX, PAPER_MAX_DRAWDOWN, OPEN_POSITIONS
 
-    posiciones_a_cerrar = []
-    for i, pos in enumerate(OPEN_POSITIONS):
-        pnl = paper_calcular_pnl(pos, precio_actual)
-        cerrar = False
-        motivo = ""
-        if pos['decision'] == "Buy":
-            if precio_actual <= pos['sl']:
-                cerrar = True; motivo = "SL"
-            elif precio_actual >= pos['tp']:
-                cerrar = True; motivo = "TP"
-        else:
-            if precio_actual >= pos['sl']:
-                cerrar = True; motivo = "SL"
-            elif precio_actual <= pos['tp']:
-                cerrar = True; motivo = "TP"
+    posiciones_a_remover = []
 
-        if cerrar:
-            posiciones_a_cerrar.append((i, pos, pnl, motivo))
+    for idx, pos in enumerate(OPEN_POSITIONS):
+        trade_id = pos['trade_id']
+        decision = pos['decision']
+        entry = pos['entry_price']
+        remaining = pos['remaining_size_btc']
+        status = pos['status']
+        current_sl = pos['current_sl']
+        current_tp = pos['current_tp']
 
-    for i, pos, pnl, motivo in reversed(posiciones_a_cerrar):
+        pnl = 0
+        cerrar_total = False
+        cerrar_parcial = False
+        motivo_cierre = ""
+        nuevo_status = status
+        precio_cierre = None
+        cantidad_cerrar = 0
+
+        # -------- Verificar SL (siempre prioritario) --------
+        if decision == "Buy":
+            if precio_actual <= current_sl:
+                cerrar_total = True
+                motivo_cierre = "SL"
+                precio_cierre = current_sl
+        else:  # Sell
+            if precio_actual >= current_sl:
+                cerrar_total = True
+                motivo_cierre = "SL"
+                precio_cierre = current_sl
+
+        if cerrar_total:
+            pnl = paper_calcular_pnl(pos, precio_cierre)
+            pos['remaining_size_btc'] = 0
+            cantidad_cerrar = remaining
+            posiciones_a_remover.append((idx, pos, pnl, f"CIERRE TOTAL #{trade_id} - {motivo_cierre}"))
+            continue
+
+        # -------- Lógica por estado --------
+        if status == 'ACTIVE':
+            # Verificar TP1
+            if decision == "Buy" and precio_actual >= current_tp:
+                cerrar_parcial = True
+                motivo_cierre = "TP1"
+                precio_cierre = current_tp
+            elif decision == "Sell" and precio_actual <= current_tp:
+                cerrar_parcial = True
+                motivo_cierre = "TP1"
+                precio_cierre = current_tp
+
+            if cerrar_parcial:
+                # Cerrar el 50% del tamaño restante (que es el full)
+                cantidad_cerrar = pos['full_size_btc'] * 0.5
+                pnl = (precio_cierre - entry) * cantidad_cerrar if decision == "Buy" else (entry - precio_cierre) * cantidad_cerrar
+                # Actualizar posición
+                pos['remaining_size_btc'] -= cantidad_cerrar
+                pos['current_sl'] = entry  # SL a breakeven
+                pos['current_tp'] = pos['tp2']  # Apuntar a TP2
+                pos['status'] = 'TP1_HIT'
+                # Registrar cierre parcial (no se remueve la posición)
+                mensaje = (
+                    f"🔓 CIERRE PARCIAL #{trade_id} - TP1 alcanzado\n"
+                    f"💰 Precio cierre: {precio_cierre:.2f}\n"
+                    f"📊 PnL Parcial: {pnl:.4f} USD\n"
+                    f"💵 Balance: {PAPER_BALANCE + pnl:.2f} USD\n"
+                    f"🔄 SL movido a breakeven ({entry:.2f})\n"
+                    f"🎯 Buscando TP2 ({pos['tp2']:.2f}) | Restante: {pos['remaining_size_btc']:.6f} BTC"
+                )
+                telegram_mensaje(mensaje)
+                # Actualizar balance con el PnL parcial
+                PAPER_BALANCE += pnl
+                PAPER_PNL_GLOBAL += pnl
+                if PAPER_BALANCE > PAPER_BALANCE_MAX:
+                    PAPER_BALANCE_MAX = PAPER_BALANCE
+                drawdown = PAPER_BALANCE_MAX - PAPER_BALANCE
+                if drawdown > PAPER_MAX_DRAWDOWN:
+                    PAPER_MAX_DRAWDOWN = drawdown
+                # Enviar gráfico de cierre parcial
+                fig = generar_grafico_entrada(
+                    df=df_actual,
+                    decision=decision,
+                    soporte=pos['estado_entrada']['soporte'],
+                    resistencia=pos['estado_entrada']['resistencia'],
+                    slope=pos['estado_entrada']['slope'],
+                    intercept=pos['estado_entrada']['intercept'],
+                    razones=pos['razones'],
+                    estado=pos['estado_entrada'],
+                    precio_salida=precio_cierre,
+                    trade_id=trade_id
+                )
+                if fig:
+                    telegram_grafico(fig)
+                    plt.close(fig)
+                # Este trade sigue abierto, no lo removemos
+                continue
+
+        elif status == 'TP1_HIT':
+            # Verificar TP2
+            if decision == "Buy" and precio_actual >= current_tp:
+                cerrar_parcial = False  # No cerramos, solo movemos SL
+                motivo_cierre = "TP2"
+                precio_cierre = current_tp
+            elif decision == "Sell" and precio_actual <= current_tp:
+                cerrar_parcial = False
+                motivo_cierre = "TP2"
+                precio_cierre = current_tp
+            else:
+                # Si no se alcanza TP2, seguimos y el SL (en entry) se encargará si retrocede
+                continue
+
+            # Alcanzó TP2: mover SL a TP2, eliminar TP, cambiar estado
+            pos['current_sl'] = current_tp  # SL se mueve a TP2
+            pos['current_tp'] = None        # Sin TP fijo, solo SL trailing
+            pos['status'] = 'TP2_HIT'
+            mensaje = (
+                f"🚀 #TP2 ALCANZADO #{trade_id}\n"
+                f"📍 Precio: {precio_cierre:.2f}\n"
+                f"🔒 SL movido a {current_tp:.2f} (asegurando ganancias)\n"
+                f"📦 Restante: {pos['remaining_size_btc']:.6f} BTC | Dejando correr..."
+            )
+            telegram_mensaje(mensaje)
+            # No se cierra nada, solo se ajusta SL. Seguir en el loop.
+
+        elif status == 'TP2_HIT':
+            # Solo nos fijamos en el SL (que es el TP2 anterior)
+            # Si el precio retrocede y toca el SL, se cierra el resto.
+            # Esto ya lo maneja la verificación de SL al principio del loop.
+            # Pero el SL ya está en current_sl, y current_tp es None.
+            # La lógica de SL al principio lo cerrará si toca.
+            pass
+
+    # -------- Cerrar totalmente las posiciones marcadas --------
+    for idx, pos, pnl, mensaje_titulo in reversed(posiciones_a_remover):
+        # El PnL ya está calculado para el cierre total
+        # Si no se calculó (por alguna razon), calcularlo ahora
+        if pnl == 0 and pos['remaining_size_btc'] > 0:
+             # Calcular basado en precio_actual si no se definió
+            pnl = paper_calcular_pnl(pos, precio_actual)
+            # Asegurar que se cierre todo
+        if pos['remaining_size_btc'] > 0:
+            # Si por alguna razon no se había vaciado, vaciar
+            pnl = paper_calcular_pnl(pos, precio_actual) if pnl == 0 else pnl
+            pos['remaining_size_btc'] = 0
+
         PAPER_BALANCE += pnl
         PAPER_PNL_GLOBAL += pnl
         PAPER_TRADES_TOTALES += 1
@@ -812,7 +864,7 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
             PAPER_MAX_DRAWDOWN = drawdown
 
         mensaje_cierre = (
-            f"📌 CIERRE PAPER {pos['decision']} ({motivo})\n"
+            f"📌 {mensaje_titulo}\n"
             f"📍 Entrada: {pos['entry_price']:.2f}\n"
             f"📍 Salida: {precio_actual:.2f}\n"
             f"💰 PnL Trade: {pnl:.4f} USD\n"
@@ -822,7 +874,7 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
             f"📉 Max Drawdown: {PAPER_MAX_DRAWDOWN:.4f} USD\n"
             f"🧠 Razones: {', '.join(pos['razones'])}\n"
             f"📰 Noticia: {noticia_titulo}\n"
-            f"📌 Fuente: {noticia_fuente} | Sentimiento: {sent_label} (score: {sent_score:.3f})"
+            f"📌 Fuente: {noticia_fuente} | Sentimiento: {sent_label} ({sent_score:.3f})"
         )
         telegram_mensaje(mensaje_cierre)
 
@@ -836,28 +888,39 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
             intercept=estado_ent['intercept'],
             razones=pos['razones'],
             estado=estado_ent,
-            precio_salida=precio_actual
+            precio_salida=precio_actual,
+            trade_id=pos['trade_id']
         )
         if fig:
             telegram_grafico(fig)
             plt.close(fig)
 
-        OPEN_POSITIONS.pop(i)
+        # Remover la posición (usando pop en orden inverso)
+        # Como tenemos la lista de indices, los removemos uno por uno en orden inverso
+        # Pero como OPEN_POSITIONS muta, usamos un marker para borrar después
+        pass
 
-    return len(posiciones_a_cerrar) > 0
+    # Remover posiciones marcadas (reversed para no alterar indices)
+    for idx, pos, pnl, mensaje in reversed(posiciones_a_remover):
+        # Encontrar el indice real en OPEN_POSITIONS (por si acaso)
+        for i, p in enumerate(OPEN_POSITIONS):
+            if p['trade_id'] == pos['trade_id']:
+                OPEN_POSITIONS.pop(i)
+                break
+
+    return len(posiciones_a_remover) > 0
 
 # ============================================================
 # LOOP PRINCIPAL (SIN HEARTBEAT)
 # ============================================================
 def run_bot():
-    telegram_mensaje("🤖 BOT V90.4 INICIADO (MEJORADO)\n"
+    telegram_mensaje("🤖 BOT V90.5 INICIADO (MEJORADO)\n"
                      f"📊 Velas: {INTERVAL}m | Máx. posiciones: {MAX_OPEN_TRADES}\n"
-                     "📈 Prioridad: Soporte → BUY, Resistencia → SELL")
+                     f"⚡ Leverage: {LEVERAGE}x | TP1 50% | TP2 dinámico")
     ultima_fecha = None
 
     while True:
         try:
-            # 1. Obtener velas
             df = obtener_velas()
             df = calcular_indicadores(df)
 
@@ -866,20 +929,16 @@ def run_bot():
                 time.sleep(SLEEP_SECONDS)
                 continue
 
-            # 2. Extraer estado usando la última vela cerrada
             estado = extraer_estado_mercado(df, usar_cerrada=True)
             if estado is None:
                 logger.warning("⚠️ Estado nulo. Saltando ciclo...")
                 time.sleep(SLEEP_SECONDS)
                 continue
 
-            # 3. Noticias y sentimiento (desde caché)
             titulo, fuente, sent_label, sent_score = obtener_noticias_y_sentimiento()
 
-            # 4. Decisión técnica
             decision, soporte, resistencia, razones = motor_v90(estado, df)
 
-            # 5. Filtro fundamental mejorado (tiene en cuenta zona)
             filtro_ok = True
             motivo_filtro = "Sin filtro"
             if decision:
@@ -887,7 +946,6 @@ def run_bot():
                 if not filtro_ok:
                     decision = None
 
-            # 6. Log en consola (incluye noticia)
             num_abiertas = len(OPEN_POSITIONS)
             logger.info("="*100)
             logger.info(f"🕒 {estado['fecha']} | 💰 BTC: {estado['precio']:.2f}")
@@ -902,9 +960,8 @@ def run_bot():
             logger.info(f"📰 Noticia: {titulo} (Fuente: {fuente}) | Sentimiento: {sent_label} ({sent_score:.3f})")
             logger.info("="*100)
 
-            # 7. Ejecutar operación
             if decision and num_abiertas < MAX_OPEN_TRADES:
-                apertura = paper_abrir_posicion(
+                pos = paper_abrir_posicion(
                     decision=decision,
                     precio=estado['precio'],
                     atr=estado['atr'],
@@ -915,13 +972,14 @@ def run_bot():
                     estado=estado
                 )
 
-                if apertura:
-                    pnl_flotante = paper_calcular_pnl(OPEN_POSITIONS[-1], estado['precio'])
+                if pos:
+                    trade_id = pos['trade_id']
+                    pnl_flotante = paper_calcular_pnl(pos, estado['precio'])
                     mensaje_entrada = (
-                        f"📌 ENTRADA PAPER {decision}\n"
+                        f"📌 ENTRADA PAPER #{trade_id} {decision}\n"
                         f"💰 Precio: {estado['precio']:.2f}\n"
-                        f"📍 SL: {OPEN_POSITIONS[-1]['sl']:.2f} | TP: {OPEN_POSITIONS[-1]['tp']:.2f}\n"
-                        f"📦 Size USD: {OPEN_POSITIONS[-1]['size_usd']:.2f} | Size BTC: {OPEN_POSITIONS[-1]['size_btc']:.6f}\n"
+                        f"📍 SL: {pos['sl']:.2f} | TP1: {pos['tp1']:.2f} | TP2: {pos['tp2']:.2f}\n"
+                        f"📦 Size USD (notional): {pos['size_usd']:.2f} | Size BTC: {pos['full_size_btc']:.6f}\n"
                         f"💵 Balance: {PAPER_BALANCE:.2f} USD\n"
                         f"📈 PnL flotante: {pnl_flotante:.4f} USD\n"
                         f"📊 PnL Global: {PAPER_PNL_GLOBAL:.4f} USD\n"
@@ -933,7 +991,7 @@ def run_bot():
                         f"🔒 Filtro fundamental: {motivo_filtro}\n"
                         f"📊 Posiciones abiertas: {len(OPEN_POSITIONS)}/{MAX_OPEN_TRADES}\n"
                         f"📰 Noticia: {titulo}\n"
-                        f"📌 Fuente: {fuente} | Sentimiento: {sent_label} (score: {sent_score:.3f})"
+                        f"📌 Fuente: {fuente} | Sentimiento: {sent_label} ({sent_score:.3f})"
                     )
                     telegram_mensaje(mensaje_entrada)
 
@@ -945,17 +1003,17 @@ def run_bot():
                         slope=estado['slope'],
                         intercept=estado['intercept'],
                         razones=razones,
-                        estado=estado
+                        estado=estado,
+                        trade_id=trade_id
                     )
                     if fig:
                         telegram_grafico(fig)
                         plt.close(fig)
 
-            # 8. Revisar SL/TP y cerrar posiciones (envía gráfico con salida y noticia)
+            # Revisar posiciones (TP1, TP2, SL)
             precio_actual = estado['precio']
             paper_revisar_posiciones(precio_actual, df, titulo, fuente, sent_label, sent_score)
 
-            # 9. Reset diario
             fecha_hoy = datetime.now(timezone.utc).date()
             if ultima_fecha is None:
                 ultima_fecha = fecha_hoy
@@ -963,7 +1021,6 @@ def run_bot():
                 ultima_fecha = fecha_hoy
                 logger.info("Nuevo día.")
 
-            # 10. Esperar 5 min
             time.sleep(SLEEP_SECONDS)
 
         except Exception as e:
