@@ -1,12 +1,10 @@
 # ============================================================
-# BOT TRADING V90.5 – GESTIÓN AVANZADA (TP2 + LEVERAGE 10x)
+# BOT TRADING V90.6 – TRAILING STOP DINÁMICO POST-TP2
 # ============================================================
 # - Velas de 5 minutos, máximo 3 operaciones abiertas
-# - Fuente principal: NewsAPI (caché 1 hora) + Google RSS
-# - Sentimiento con VADER (léxico, sin IA)
-# - Gráfico con fondo negro, flecha de entrada y marcador de salida
-# - NUEVO: Apalancamiento x10, cierre parcial 50% en TP1, SL a BE, TP2 dinámico
-# - NUEVO: Identificador único (#ID) para cada operación
+# - Apalancamiento x10, cierre parcial 50% en TP1, SL a BE
+# - TP2 dinámico + TRAILING STOP (0.75 ATR) para capturar tendencias
+# - Identificador único (#ID) para cada operación
 # ============================================================
 
 import os
@@ -40,9 +38,12 @@ logger = logging.getLogger(__name__)
 SYMBOL = "BTCUSDT"
 INTERVAL = "5"                 # 5 minutos
 RISK_PER_TRADE = 0.0025        # 0.25% del balance por operación
-LEVERAGE = 10                  # <-- NUEVO: Apalancamiento 10x
-MAX_OPEN_TRADES = 3            # máximo 3 operaciones abiertas simultáneas
-SLEEP_SECONDS = 300            # 5 minutos (revisión)
+LEVERAGE = 10                  # Apalancamiento 10x
+MAX_OPEN_TRADES = 3
+SLEEP_SECONDS = 300
+
+# Trailing Stop después de TP2
+TRAILING_OFFSET_ATR = 0.75     # <-- NUEVO: distancia en múltiplos de ATR para el trailing
 
 # Gráficos
 GRAFICO_VELAS_LIMIT = 120
@@ -71,8 +72,7 @@ PAPER_LOSS = 0
 PAPER_TRADES_TOTALES = 0
 PAPER_MAX_DRAWDOWN = 0.0
 PAPER_BALANCE_MAX = PAPER_BALANCE_INICIAL
-
-TRADE_COUNTER = 0              # <-- NUEVO: Contador global de trades
+TRADE_COUNTER = 0
 
 # ============================================================
 # CREDENCIALES (VARIABLES DE ENTORNO)
@@ -93,7 +93,7 @@ sentiment_analyzer = SentimentIntensityAnalyzer()
 BASE_URL = "https://api.bybit.com"
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM (SIN CAMBIOS)
 # ============================================================
 def telegram_mensaje(texto):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -118,7 +118,7 @@ def telegram_grafico(fig):
         logger.error(f"Telegram photo error: {e}")
 
 # ============================================================
-# OBTENER VELAS BYBIT (SIN CAMBIOS)
+# OBTENER VELAS, INDICADORES, ESTADO (SIN CAMBIOS)
 # ============================================================
 def obtener_velas(limit=300):
     url = f"{BASE_URL}/v5/market/kline"
@@ -162,9 +162,6 @@ def calcular_indicadores(df):
     df['atr'] = tr.rolling(14).mean()
     return df
 
-# ============================================================
-# CEREBRO DE DATOS (SIN CAMBIOS)
-# ============================================================
 def extraer_estado_mercado(df, usar_cerrada=True):
     if df.empty:
         return None
@@ -294,7 +291,7 @@ def extraer_estado_mercado_por_indice(df, idx):
     return extraer_estado_mercado(df_temp, usar_cerrada=False)
 
 # ============================================================
-# PATRONES MULTIVELA (SIN CAMBIOS)
+# PATRONES Y MOTOR DE DECISIÓN (SIN CAMBIOS)
 # ============================================================
 def detectar_patron_multivela(df, n=3):
     if len(df) < n:
@@ -314,13 +311,9 @@ def confirmar_patron(estado_ant, estado_act):
         return True, "Estrella fugaz confirmada (bajista)"
     return False, ""
 
-# ============================================================
-# MOTOR DE DECISIÓN V90.4 (SIN CAMBIOS)
-# ============================================================
 def motor_v90(estado_actual, df):
     if estado_actual is None:
         return None, 0, 0, ["Estado nulo"]
-
     precio = estado_actual['precio']
     soporte = estado_actual['soporte']
     resistencia = estado_actual['resistencia']
@@ -329,7 +322,6 @@ def motor_v90(estado_actual, df):
     ema20 = estado_actual['ema20']
     ema_nivel = estado_actual['ema_nivel']
     patron = estado_actual['patron']
-
     razones = []
 
     patron_mult, desc_mult = detectar_patron_multivela(df)
@@ -347,7 +339,6 @@ def motor_v90(estado_actual, df):
             razones.append(f"Patrón de reversión alcista: {patron}")
             razones.append(f"Contexto: {tendencia} | cerca de soporte {soporte:.2f}")
             return 'Buy', soporte, resistencia, razones
-
     if "Estrella fugaz" in patron:
         if tendencia == '📈 ALCISTA' or abs(precio - resistencia) < atr:
             razones.append(f"Patrón de reversión bajista: {patron}")
@@ -386,7 +377,6 @@ def motor_v90(estado_actual, df):
         if tendencia == '📉 BAJISTA' and estado_actual['close'] < soporte:
             senal_bajista_fuerte = True
             razones.append("Cierre por debajo del soporte → ruptura bajista")
-
         if senal_bajista_fuerte:
             razones.append("Señal bajista fuerte en soporte → NO COMPRAMOS")
             if estado_actual['close'] < soporte - 0.3 * atr:
@@ -410,7 +400,6 @@ def motor_v90(estado_actual, df):
         if tendencia == '📈 ALCISTA' and estado_actual['close'] > resistencia:
             senal_alcista_fuerte = True
             razones.append("Cierre por encima de resistencia → ruptura alcista")
-
         if senal_alcista_fuerte:
             razones.append("Señal alcista fuerte en resistencia → NO VENDEMOS")
             if estado_actual['close'] > resistencia + 0.3 * atr:
@@ -426,15 +415,12 @@ def motor_v90(estado_actual, df):
     if ema_nivel == 'resistencia' and abs(precio - ema20) < atr * 0.5 and tendencia != '📈 ALCISTA':
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde abajo (EMA actúa como resistencia)")
         return 'Sell', soporte, resistencia, razones
-
     if ema_nivel == 'soporte' and abs(precio - ema20) < atr * 0.5 and tendencia != '📉 BAJISTA':
         razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde arriba (EMA actúa como soporte)")
         return 'Buy', soporte, resistencia, razones
-
     if estado_actual['close'] > ema20 and estado_actual['open'] < ema20 and estado_actual['close'] > estado_actual['open']:
         razones.append(f"Ruptura alcista de EMA20 ({ema20:.2f})")
         return 'Buy', soporte, resistencia, razones
-
     if estado_actual['close'] < ema20 and estado_actual['open'] > ema20 and estado_actual['close'] < estado_actual['open']:
         razones.append(f"Ruptura bajista de EMA20 ({ema20:.2f})")
         return 'Sell', soporte, resistencia, razones
@@ -639,7 +625,7 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         return None
 
 # ============================================================
-# NUEVA GESTIÓN DE POSICIONES CON TP2 Y LEVERAGE
+# NUEVA GESTIÓN DE POSICIONES CON TP2 + TRAILING STOP
 # ============================================================
 
 def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, tiempo, estado):
@@ -648,16 +634,13 @@ def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, t
     if len(OPEN_POSITIONS) >= MAX_OPEN_TRADES:
         return None
 
-    # Calcular riesgo en USD (0.25% del balance)
-    riesgo_usd = PAPER_BALANCE * RISK_PER_TRADE * LEVERAGE  # <-- Aplicamos apalancamiento
+    riesgo_usd = PAPER_BALANCE * RISK_PER_TRADE * LEVERAGE
 
     if decision == "Buy":
         sl = precio - 1.5 * atr
-        # TP1: 2.0 * ATR, pero sin sobrepasar la resistencia
         tp1 = min(resistencia, precio + 2.0 * atr)
-        # TP2: 3.5 * ATR, dejando correr si rompe resistencia
         tp2 = precio + 3.5 * atr
-    else:  # Sell
+    else:
         sl = precio + 1.5 * atr
         tp1 = max(soporte, precio - 2.0 * atr)
         tp2 = precio - 3.5 * atr
@@ -666,11 +649,9 @@ def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, t
     if distancia_sl == 0:
         return None
 
-    # Tamaño del contrato (con apalancamiento)
     size_btc = riesgo_usd / distancia_sl
     size_usd = size_btc * precio
 
-    # Incrementar contador de trades
     TRADE_COUNTER += 1
     trade_id = TRADE_COUNTER
 
@@ -681,9 +662,9 @@ def paper_abrir_posicion(decision, precio, atr, soporte, resistencia, razones, t
         'sl': sl,
         'tp1': tp1,
         'tp2': tp2,
-        'current_sl': sl,           # SL actual (se moverá)
-        'current_tp': tp1,          # TP actual (se moverá a tp2)
-        'status': 'ACTIVE',         # ACTIVE, TP1_HIT, TP2_HIT
+        'current_sl': sl,
+        'current_tp': tp1,
+        'status': 'ACTIVE',
         'full_size_btc': size_btc,
         'remaining_size_btc': size_btc,
         'size_usd': size_usd,
@@ -715,12 +696,12 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
         status = pos['status']
         current_sl = pos['current_sl']
         current_tp = pos['current_tp']
+        atr = pos['estado_entrada']['atr']
 
         pnl = 0
         cerrar_total = False
         cerrar_parcial = False
         motivo_cierre = ""
-        nuevo_status = status
         precio_cierre = None
         cantidad_cerrar = 0
 
@@ -730,7 +711,7 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
                 cerrar_total = True
                 motivo_cierre = "SL"
                 precio_cierre = current_sl
-        else:  # Sell
+        else:
             if precio_actual >= current_sl:
                 cerrar_total = True
                 motivo_cierre = "SL"
@@ -745,7 +726,6 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
 
         # -------- Lógica por estado --------
         if status == 'ACTIVE':
-            # Verificar TP1
             if decision == "Buy" and precio_actual >= current_tp:
                 cerrar_parcial = True
                 motivo_cierre = "TP1"
@@ -756,15 +736,12 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
                 precio_cierre = current_tp
 
             if cerrar_parcial:
-                # Cerrar el 50% del tamaño restante (que es el full)
                 cantidad_cerrar = pos['full_size_btc'] * 0.5
                 pnl = (precio_cierre - entry) * cantidad_cerrar if decision == "Buy" else (entry - precio_cierre) * cantidad_cerrar
-                # Actualizar posición
                 pos['remaining_size_btc'] -= cantidad_cerrar
-                pos['current_sl'] = entry  # SL a breakeven
-                pos['current_tp'] = pos['tp2']  # Apuntar a TP2
+                pos['current_sl'] = entry
+                pos['current_tp'] = pos['tp2']
                 pos['status'] = 'TP1_HIT'
-                # Registrar cierre parcial (no se remueve la posición)
                 mensaje = (
                     f"🔓 CIERRE PARCIAL #{trade_id} - TP1 alcanzado\n"
                     f"💰 Precio cierre: {precio_cierre:.2f}\n"
@@ -774,7 +751,6 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
                     f"🎯 Buscando TP2 ({pos['tp2']:.2f}) | Restante: {pos['remaining_size_btc']:.6f} BTC"
                 )
                 telegram_mensaje(mensaje)
-                # Actualizar balance con el PnL parcial
                 PAPER_BALANCE += pnl
                 PAPER_PNL_GLOBAL += pnl
                 if PAPER_BALANCE > PAPER_BALANCE_MAX:
@@ -782,7 +758,6 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
                 drawdown = PAPER_BALANCE_MAX - PAPER_BALANCE
                 if drawdown > PAPER_MAX_DRAWDOWN:
                     PAPER_MAX_DRAWDOWN = drawdown
-                # Enviar gráfico de cierre parcial
                 fig = generar_grafico_entrada(
                     df=df_actual,
                     decision=decision,
@@ -798,54 +773,67 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
                 if fig:
                     telegram_grafico(fig)
                     plt.close(fig)
-                # Este trade sigue abierto, no lo removemos
                 continue
 
         elif status == 'TP1_HIT':
             # Verificar TP2
             if decision == "Buy" and precio_actual >= current_tp:
-                cerrar_parcial = False  # No cerramos, solo movemos SL
+                cerrar_parcial = False
                 motivo_cierre = "TP2"
                 precio_cierre = current_tp
+                # Alcanzó TP2: mover SL a TP2, activar trailing
+                pos['current_sl'] = current_tp
+                pos['current_tp'] = None
+                pos['status'] = 'TP2_HIT'
+                mensaje = (
+                    f"🚀 #TP2 ALCANZADO #{trade_id}\n"
+                    f"📍 Precio: {precio_cierre:.2f}\n"
+                    f"🔒 SL movido a {current_tp:.2f}\n"
+                    f"📈 TRAILING STOP ACTIVADO (offset {TRAILING_OFFSET_ATR} ATR)\n"
+                    f"📦 Restante: {pos['remaining_size_btc']:.6f} BTC | Dejando correr..."
+                )
+                telegram_mensaje(mensaje)
+                # No cerrar, solo cambiar estado
+                continue
+
             elif decision == "Sell" and precio_actual <= current_tp:
                 cerrar_parcial = False
                 motivo_cierre = "TP2"
                 precio_cierre = current_tp
-            else:
-                # Si no se alcanza TP2, seguimos y el SL (en entry) se encargará si retrocede
+                pos['current_sl'] = current_tp
+                pos['current_tp'] = None
+                pos['status'] = 'TP2_HIT'
+                mensaje = (
+                    f"🚀 #TP2 ALCANZADO #{trade_id}\n"
+                    f"📍 Precio: {precio_cierre:.2f}\n"
+                    f"🔒 SL movido a {current_tp:.2f}\n"
+                    f"📈 TRAILING STOP ACTIVADO (offset {TRAILING_OFFSET_ATR} ATR)\n"
+                    f"📦 Restante: {pos['remaining_size_btc']:.6f} BTC | Dejando correr..."
+                )
+                telegram_mensaje(mensaje)
                 continue
 
-            # Alcanzó TP2: mover SL a TP2, eliminar TP, cambiar estado
-            pos['current_sl'] = current_tp  # SL se mueve a TP2
-            pos['current_tp'] = None        # Sin TP fijo, solo SL trailing
-            pos['status'] = 'TP2_HIT'
-            mensaje = (
-                f"🚀 #TP2 ALCANZADO #{trade_id}\n"
-                f"📍 Precio: {precio_cierre:.2f}\n"
-                f"🔒 SL movido a {current_tp:.2f} (asegurando ganancias)\n"
-                f"📦 Restante: {pos['remaining_size_btc']:.6f} BTC | Dejando correr..."
-            )
-            telegram_mensaje(mensaje)
-            # No se cierra nada, solo se ajusta SL. Seguir en el loop.
-
         elif status == 'TP2_HIT':
-            # Solo nos fijamos en el SL (que es el TP2 anterior)
-            # Si el precio retrocede y toca el SL, se cierra el resto.
-            # Esto ya lo maneja la verificación de SL al principio del loop.
-            # Pero el SL ya está en current_sl, y current_tp es None.
-            # La lógica de SL al principio lo cerrará si toca.
-            pass
+            # <-- NUEVO: Trailing Stop Dinámico
+            if decision == "Buy":
+                # El SL se mueve hacia arriba manteniendo distancia
+                nuevo_sl = precio_actual - TRAILING_OFFSET_ATR * atr
+                if nuevo_sl > pos['current_sl']:
+                    pos['current_sl'] = nuevo_sl
+                    # Opcional: enviar mensaje si se mueve mucho (evitamos spam, solo log)
+                    logger.debug(f"#{trade_id} Trailing SL actualizado a {nuevo_sl:.2f}")
+            else:  # Sell
+                nuevo_sl = precio_actual + TRAILING_OFFSET_ATR * atr
+                if nuevo_sl < pos['current_sl']:
+                    pos['current_sl'] = nuevo_sl
+                    logger.debug(f"#{trade_id} Trailing SL actualizado a {nuevo_sl:.2f}")
+            # No se cierra nada, el SL ajustado se verificará en el próximo ciclo
 
     # -------- Cerrar totalmente las posiciones marcadas --------
     for idx, pos, pnl, mensaje_titulo in reversed(posiciones_a_remover):
-        # El PnL ya está calculado para el cierre total
-        # Si no se calculó (por alguna razon), calcularlo ahora
         if pnl == 0 and pos['remaining_size_btc'] > 0:
-             # Calcular basado en precio_actual si no se definió
             pnl = paper_calcular_pnl(pos, precio_actual)
-            # Asegurar que se cierre todo
         if pos['remaining_size_btc'] > 0:
-            # Si por alguna razon no se había vaciado, vaciar
             pnl = paper_calcular_pnl(pos, precio_actual) if pnl == 0 else pnl
             pos['remaining_size_btc'] = 0
 
@@ -895,14 +883,8 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
             telegram_grafico(fig)
             plt.close(fig)
 
-        # Remover la posición (usando pop en orden inverso)
-        # Como tenemos la lista de indices, los removemos uno por uno en orden inverso
-        # Pero como OPEN_POSITIONS muta, usamos un marker para borrar después
-        pass
-
-    # Remover posiciones marcadas (reversed para no alterar indices)
+    # Remover posiciones marcadas
     for idx, pos, pnl, mensaje in reversed(posiciones_a_remover):
-        # Encontrar el indice real en OPEN_POSITIONS (por si acaso)
         for i, p in enumerate(OPEN_POSITIONS):
             if p['trade_id'] == pos['trade_id']:
                 OPEN_POSITIONS.pop(i)
@@ -914,9 +896,9 @@ def paper_revisar_posiciones(precio_actual, df_actual, noticia_titulo, noticia_f
 # LOOP PRINCIPAL (SIN HEARTBEAT)
 # ============================================================
 def run_bot():
-    telegram_mensaje("🤖 BOT V90.5 INICIADO (MEJORADO)\n"
+    telegram_mensaje("🤖 BOT V90.6 INICIADO (MEJORADO)\n"
                      f"📊 Velas: {INTERVAL}m | Máx. posiciones: {MAX_OPEN_TRADES}\n"
-                     f"⚡ Leverage: {LEVERAGE}x | TP1 50% | TP2 dinámico")
+                     f"⚡ Leverage: {LEVERAGE}x | TP1 50% | Trailing Stop post-TP2 ({TRAILING_OFFSET_ATR} ATR)")
     ultima_fecha = None
 
     while True:
@@ -1010,7 +992,6 @@ def run_bot():
                         telegram_grafico(fig)
                         plt.close(fig)
 
-            # Revisar posiciones (TP1, TP2, SL)
             precio_actual = estado['precio']
             paper_revisar_posiciones(precio_actual, df, titulo, fuente, sent_label, sent_score)
 
