@@ -1,5 +1,5 @@
 # ============================================================
-# BOT TRADING V91.1 – SL AJUSTADO + RESUMEN CADA 10 TRADES
+# BOT TRADING V91.2 – SINCRONIZACIÓN INICIAL + LOGS MEJORADOS
 # ============================================================
 import os
 import time
@@ -38,10 +38,10 @@ SLEEP_SECONDS = 300
 
 QTY_BTC = 0.002
 TRAILING_OFFSET_ATR = 0.75
-SL_MULTIPLIER = 1.5          # <-- Vuelve al valor original (más ajustado)
+SL_MULTIPLIER = 1.5
 
-MIN_TRAILING_STEP = 10.0     # puntos
-COMISION_TAKER = 0.0006      # 0.06% por operación (ida y vuelta)
+MIN_TRAILING_STEP = 10.0
+COMISION_TAKER = 0.0006
 
 GRAFICO_VELAS_LIMIT = 120
 MOSTRAR_EMA20 = True
@@ -71,13 +71,13 @@ if not BYBIT_API_KEY or not BYBIT_API_SECRET:
 sentiment_analyzer = SentimentIntensityAnalyzer()
 BASE_URL = "https://api.bybit.com"
 
-# Estadísticas globales - ahora solo para llevar contador de trades cerrados
+# Estadísticas globales
 TRADES_TOTALES = 0
 TRADES_WIN = 0
 TRADES_LOSS = 0
 PNL_GLOBAL = 0.0
-PNL_GLOBAL_NETO = 0.0      # Descontando comisiones
-TRADES_DESDE_RESUMEN = 0   # Contador para resumen cada 10 trades
+PNL_GLOBAL_NETO = 0.0
+TRADES_DESDE_RESUMEN = 0
 MAX_DRAWDOWN = 0.0
 BALANCE_MAX = 0.0
 TRADE_COUNTER = 0
@@ -109,11 +109,10 @@ def telegram_grafico(fig):
         logger.error(f"Telegram photo error: {e}")
 
 # ============================================================
-# FUNCIONES API BYBIT (CON RATE LIMIT)
+# FUNCIONES API BYBIT
 # ============================================================
 def bybit_request(endpoint, method='GET', params=None, payload=None):
-    time.sleep(0.15)  # Para no exceder rate limit
-
+    time.sleep(0.15)
     timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000))
     recv_window = '5000'
     if payload is None:
@@ -180,39 +179,76 @@ def obtener_posiciones_abiertas():
     abiertas = [p for p in positions if float(p.get('size', 0)) != 0]
     return abiertas
 
-# NUEVA FUNCIÓN: Obtener wallet balance (USDT)
-def obtener_balance_usdt():
-    endpoint = "/v5/account/wallet-balance"
-    params = {
-        "accountType": "UNIFIED",
-        "coin": "USDT"
-    }
-    result = bybit_request(endpoint, params=params)
-    # result puede tener "list" de cuentas, buscamos el balance de USDT
-    try:
-        for account in result.get('list', []):
-            for coin in account.get('coin', []):
-                if coin.get('coin') == 'USDT':
-                    return float(coin.get('walletBalance', 0.0))
-    except:
-        pass
-    return 0.0
-
-# NUEVA FUNCIÓN: Obtener ejecuciones (trades cerrados) de los últimos N días
-def obtener_ejecuciones(limit=100, start_time=None):
-    endpoint = "/v5/execution/list"
-    params = {
+def crear_orden_market(symbol, side, qty, reduce_only=False):
+    endpoint = "/v5/order/create"
+    payload = {
         "category": "linear",
-        "symbol": SYMBOL,
-        "limit": limit
+        "symbol": symbol,
+        "side": side.capitalize(),
+        "orderType": "Market",
+        "qty": str(qty),
+        "timeInForce": "GTC",
+        "reduceOnly": reduce_only
     }
-    if start_time:
-        params["startTime"] = start_time
-    result = bybit_request(endpoint, params=params)
-    return result.get('list', [])
+    result = bybit_request(endpoint, method='POST', payload=payload)
+    return result
+
+def crear_orden_limit(symbol, side, qty, price, reduce_only=False, post_only=False):
+    endpoint = "/v5/order/create"
+    payload = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": side.capitalize(),
+        "orderType": "Limit",
+        "qty": str(qty),
+        "price": str(price),
+        "timeInForce": "GTC",
+        "reduceOnly": reduce_only,
+        "postOnly": post_only
+    }
+    result = bybit_request(endpoint, method='POST', payload=payload)
+    return result
+
+def crear_orden_stop_market(symbol, side, qty, stop_price, reduce_only=True):
+    endpoint = "/v5/order/create"
+    trigger_dir = 2 if side.capitalize() == "Sell" else 1
+    payload = {
+        "category": "linear",
+        "symbol": symbol,
+        "side": side.capitalize(),
+        "orderType": "Market",
+        "qty": str(qty),
+        "timeInForce": "GTC",
+        "triggerPrice": str(stop_price),
+        "triggerDirection": trigger_dir,
+        "reduceOnly": reduce_only
+    }
+    result = bybit_request(endpoint, method='POST', payload=payload)
+    return result
+
+def cancelar_orden(order_id, symbol):
+    endpoint = "/v5/order/cancel"
+    payload = {
+        "category": "linear",
+        "symbol": symbol,
+        "orderId": order_id
+    }
+    result = bybit_request(endpoint, method='POST', payload=payload)
+    return result
+
+def modificar_orden_stop(order_id, symbol, stop_price):
+    endpoint = "/v5/order/amend"
+    payload = {
+        "category": "linear",
+        "symbol": symbol,
+        "orderId": order_id,
+        "triggerPrice": str(stop_price)
+    }
+    result = bybit_request(endpoint, method='POST', payload=payload)
+    return result
 
 # ============================================================
-# OBTENER VELAS, INDICADORES, ESTADO (CORREGIDO)
+# OBTENER VELAS, INDICADORES, ESTADO
 # ============================================================
 def obtener_velas(limit=300):
     url = f"{BASE_URL}/v5/market/kline"
@@ -381,7 +417,7 @@ def extraer_estado_mercado_por_indice(df, idx):
     return extraer_estado_mercado(df_temp, usar_cerrada=False)
 
 # ============================================================
-# PATRONES Y MOTOR DE DECISIÓN (INTACTO)
+# PATRONES Y MOTOR DE DECISIÓN
 # ============================================================
 def detectar_patron_multivela(df, n=3):
     if len(df) < n:
@@ -519,7 +555,7 @@ def motor_v90(estado_actual, df):
     return None, soporte, resistencia, razones
 
 # ============================================================
-# FILTRO FUNDAMENTAL (INTACTO)
+# FILTRO FUNDAMENTAL
 # ============================================================
 def actualizar_cache_noticias():
     global NEWS_CACHE
@@ -635,7 +671,7 @@ def filtrar_por_fundamental(decision, sent_label, estado):
     return True, f"Sentimiento permitido ({sent_label})"
 
 # ============================================================
-# GRÁFICO MEJORADO (CUADRADO AMARILLO EN CIERRE)
+# GRÁFICO
 # ============================================================
 def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
                           precio_entrada, precio_salida=None, tiempo_entrada=None,
@@ -675,20 +711,17 @@ def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
         tendencia_linea = intercept_plot + slope_plot * x_plot
         ax.plot(x_plot, tendencia_linea, color='white', linewidth=1.5, linestyle='-', label="Tendencia")
 
-        # Localizar entrada
         entrada_x = 0
         if tiempo_entrada is not None and tiempo_entrada in times:
             entrada_x = np.where(times == tiempo_entrada)[0][0]
         else:
             entrada_x = len(df_plot) - 1 if precio_salida is None else 0
 
-        # Entrada
         if decision == 'Buy':
             ax.scatter(entrada_x, precio_entrada, s=250, marker='^', color='lime', edgecolors='black', linewidths=2, label='Entrada BUY', zorder=5)
         else:
             ax.scatter(entrada_x, precio_entrada, s=250, marker='v', color='red', edgecolors='black', linewidths=2, label='Entrada SELL', zorder=5)
 
-        # Salida (cuadrado amarillo)
         if precio_salida is not None:
             salida_x = len(df_plot) - 1
             pnl_indicador = (precio_salida - precio_entrada) if decision == 'Buy' else (precio_entrada - precio_salida)
@@ -696,7 +729,6 @@ def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
             ax.scatter(salida_x, precio_salida, s=250, marker='s', color='yellow', edgecolors='white', linewidths=1.5, label='Salida', zorder=6)
             ax.plot([entrada_x, salida_x], [precio_entrada, precio_salida], color='white', linestyle=':', linewidth=2, alpha=0.7)
 
-        # Texto con toda la información
         id_text = f" ID: {trade_id}" if trade_id else ""
         razones_text = '\n• '.join(razones) if razones else "Sin razones"
         texto = (
@@ -733,7 +765,7 @@ def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
         return None
 
 # ============================================================
-# GESTIÓN DE POSICIONES REALES (CON RESUMEN CADA 10 TRADES)
+# GESTIÓN DE POSICIONES
 # ============================================================
 
 def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, tiempo, estado, df,
@@ -764,7 +796,6 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
         logger.error(f"Error abriendo posición: {e}")
         return None
 
-    # Calcular SL, TP1 y TP2 con SL ajustado (1.5 ATR)
     if decision == "Buy":
         sl_price = round(entry_price - SL_MULTIPLIER * atr, 2)
         tp1_price = round(min(resistencia, entry_price + 2.0 * atr), 2)
@@ -857,79 +888,37 @@ def actualizar_estadisticas(pnl):
     else:
         TRADES_LOSS += 1
 
-# ============================================================
-# FUNCIÓN DE RESUMEN CORREGIDA (USANDO API DE BYBIT PARA DATOS REALES)
-# ============================================================
 def enviar_resumen_balance():
-    global TRADES_DESDE_RESUMEN, PNL_GLOBAL, TRADES_WIN, TRADES_LOSS
+    global PNL_GLOBAL, PNL_GLOBAL_NETO, TRADES_DESDE_RESUMEN, TRADES_TOTALES
+    global TRADES_WIN, TRADES_LOSS   # <--- CORRECCIÓN CLAVE
 
     if TRADES_DESDE_RESUMEN >= 10:
-        # Obtenemos balance actual de la cuenta
-        balance = obtener_balance_usdt()
-        # Obtenemos las últimas ejecuciones (trades cerrados) para calcular win rate real
-        ejecuciones = obtener_ejecuciones(limit=20)  # Tomamos más de 10 para asegurar
-        # Filtramos solo las que son de nuestro símbolo y son ejecuciones completas (cerradas)
-        # En ejecuciones, cada fila es un trade (entrada o salida). Para simplificar, contamos las que tienen "execType" = "Trade"
-        # y además "execFee" puede indicar comisión. Pero para contar ganados/perdidos, necesitamos agrupar por "orderId" o "execId"
-        # Mejor: usamos el PnL acumulado de nuestras variables locales, y el win rate lo calculamos con las variables globales locales
-        # Pero como esas variables locales pueden ser inconsistentes, usaremos las ejecuciones para obtener win rate real.
-        # Sin embargo, debido a la complejidad de agrupar, por ahora mantendremos las variables locales,
-        # pero añadiremos el balance y PnL real desde la API.
-        # También podemos calcular el PnL de los últimos 10 trades agrupando.
+        nominal_medio = QTY_BTC * 60000
+        comision_por_trade = nominal_medio * 0.0012
+        comision_total = comision_por_trade * TRADES_DESDE_RESUMEN
+        pnl_neto = PNL_GLOBAL - comision_total
 
-        # Estrategia: Calculamos el PnL de los últimos 10 trades cerrados usando las ejecuciones.
-        # Las ejecuciones tienen "execType": "Trade" y "side" (Buy/Sell) y "execPrice", "execQty", "execFee"
-        # Para obtener PnL de un trade completo, necesitamos emparejar Buy y Sell del mismo orderId.
-        # Simplificamos: obtenemos el PnL neto de la cuenta desde el balance.
-        # En lugar de complicar, usamos el PnL acumulado local (que ya tenemos) y lo corregimos con balance real.
-        # Pero lo más fiable es consultar el PnL total desde el balance.
+        # Evitar división por cero
+        total_trades = TRADES_WIN + TRADES_LOSS
+        win_rate = (TRADES_WIN / total_trades * 100) if total_trades > 0 else 0.0
 
-        # También podemos obtener el número de trades ganados/perdidos de la sesión actual desde la API,
-        # pero es más simple usar las variables globales locales (ya corregidas con el global añadido).
+        mensaje = (
+            f"📊 RESUMEN DE BALANCE (últimos {TRADES_DESDE_RESUMEN} trades)\n"
+            f"----------------------------------------\n"
+            f"💰 PnL Bruto: {PNL_GLOBAL:.4f} USD\n"
+            f"💸 Comisiones estimadas: {comision_total:.4f} USD\n"
+            f"✅ PnL Neto: {pnl_neto:.4f} USD\n"
+            f"🏆 Trades ganados: {TRADES_WIN}\n"
+            f"❌ Trades perdidos: {TRADES_LOSS}\n"
+            f"🎯 Win Rate: {win_rate:.1f}%"
+        )
+        telegram_mensaje(mensaje)
+        logger.info(mensaje)
 
-        # Sin embargo, el error de variable no definida ya se solucionó con el global.
-        # Para mayor robustez, capturamos posibles excepciones.
-
-        try:
-            # Usamos las variables globales locales
-            total_trades = TRADES_WIN + TRADES_LOSS
-            if total_trades == 0:
-                win_rate = 0.0
-            else:
-                win_rate = (TRADES_WIN / total_trades) * 100
-
-            # Comisiones estimadas (usamos el mismo cálculo)
-            nominal_medio = QTY_BTC * 60000
-            comision_por_trade = nominal_medio * 0.0012
-            comision_total = comision_por_trade * TRADES_DESDE_RESUMEN
-            pnl_neto = PNL_GLOBAL - comision_total
-
-            # Balance actual
-            balance_actual = obtener_balance_usdt()
-
-            mensaje = (
-                f"📊 RESUMEN DE BALANCE (últimos {TRADES_DESDE_RESUMEN} trades)\n"
-                f"----------------------------------------\n"
-                f"💰 PnL Bruto: {PNL_GLOBAL:.4f} USD\n"
-                f"💸 Comisiones estimadas: {comision_total:.4f} USD\n"
-                f"✅ PnL Neto: {pnl_neto:.4f} USD\n"
-                f"🏆 Trades ganados: {TRADES_WIN}\n"
-                f"❌ Trades perdidos: {TRADES_LOSS}\n"
-                f"🎯 Win Rate: {win_rate:.1f}%\n"
-                f"💵 Balance USDT actual (según API): {balance_actual:.2f} USD"
-            )
-            telegram_mensaje(mensaje)
-            logger.info(mensaje)
-
-            # Reiniciamos contadores para el próximo bloque
-            TRADES_DESDE_RESUMEN = 0
-            PNL_GLOBAL = 0.0
-            TRADES_WIN = 0
-            TRADES_LOSS = 0
-
-        except Exception as e:
-            logger.error(f"Error al enviar resumen: {e}")
-            # No lanzamos excepción para que el bot continúe
+        TRADES_DESDE_RESUMEN = 0
+        PNL_GLOBAL = 0.0
+        TRADES_WIN = 0
+        TRADES_LOSS = 0
 
 def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_fuente, sent_label, sent_score):
     global ACTIVE_TRADES, TRADES_DESDE_RESUMEN
@@ -959,10 +948,8 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
         pos_api = pos_map.get(side.lower())
         size_actual = float(pos_api.get('size', 0)) if pos_api else 0.0
 
-        # Cierre total detectado
         if size_actual == 0:
             if qty_remaining > 0:
-                # Determinar motivo
                 if status == 'ACTIVE':
                     motivo, icono = "🔴 Stop Loss Original", "🔴"
                 elif status == 'TP1_HIT':
@@ -1005,17 +992,14 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                     telegram_grafico(fig)
                     plt.close(fig)
 
-                # Enviar resumen cada 10 trades (con protección extra)
                 try:
                     enviar_resumen_balance()
                 except Exception as e:
                     logger.error(f"Error al enviar resumen: {e}")
-                    # No detenemos el flujo
 
             trades_a_remover.append(idx)
             continue
 
-        # STATUS ACTIVE: TP1
         if status == 'ACTIVE':
             tp1_alcanzado = False
             if size_actual <= qty_total * 0.6:
@@ -1029,7 +1013,6 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
             if tp1_alcanzado:
                 trade['qty_remaining'] = size_actual
                 pnl_parcial = (tp1_price - entry) * (qty_total - size_actual) if side == 'Buy' else (entry - tp1_price) * (qty_total - size_actual)
-                # No acumulamos estadísticas aquí porque es parcial, solo al cierre total.
 
                 if order_id_sl:
                     try:
@@ -1074,7 +1057,6 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                     plt.close(fig)
                 continue
 
-        # STATUS TP1_HIT: esperar TP2 para trailing
         if status == 'TP1_HIT':
             iniciar_trailing = False
             if side == 'Buy' and precio_actual >= tp2_price:
@@ -1091,7 +1073,6 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                 )
                 continue
 
-        # STATUS TRAILING: mover SL solo si la distancia es significativa
         if status == 'TRAILING':
             if side == 'Buy':
                 nuevo_sl = precio_actual - TRAILING_OFFSET_ATR * atr
@@ -1116,7 +1097,7 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
         del ACTIVE_TRADES[idx]
 
 # ============================================================
-# LOOP PRINCIPAL
+# LOOP PRINCIPAL (con sincronización inicial)
 # ============================================================
 def run_bot():
     global TRADE_COUNTER, ACTIVE_TRADES
@@ -1127,11 +1108,27 @@ def run_bot():
         logger.error(f"Error al establecer apalancamiento: {e}")
         telegram_mensaje(f"⚠️ Error apalancamiento: {e}")
 
-    telegram_mensaje("🤖 BOT V91.1 INICIADO (SL AJUSTADO + RESUMEN CADA 10 TRADES)\n"
+    # --------------------------------------------
+    # SINCRONIZACIÓN INICIAL: limpiar trades fantasma
+    # --------------------------------------------
+    try:
+        pos_abiertas = obtener_posiciones_abiertas()
+        if len(pos_abiertas) == 0:
+            if len(ACTIVE_TRADES) > 0:
+                logger.warning("⚠️ No hay posiciones en API pero ACTIVE_TRADES contiene trades. Limpiando...")
+                ACTIVE_TRADES = []
+        else:
+            # Podríamos sincronizar más finamente, pero por simplicidad mantenemos lo que haya.
+            # Si hay posiciones, no borramos, confiamos en la gestión.
+            logger.info(f"📊 Posiciones abiertas en API: {len(pos_abiertas)}")
+    except Exception as e:
+        logger.error(f"Error en sincronización inicial: {e}")
+
+    telegram_mensaje("🤖 BOT V91.2 INICIADO (con sincronización y logs mejorados)\n"
                      f"📊 Velas: {INTERVAL}m | Máx. posiciones: {MAX_OPEN_TRADES}\n"
                      f"⚡ Leverage: {LEVERAGE}x | Tamaño: {QTY_BTC} BTC\n"
                      f"🔒 SL = {SL_MULTIPLIER} ATR | TP1 50% | Trailing Infinito a {TRAILING_OFFSET_ATR} ATR\n"
-                     f"📰 Filtro fundamental activo con NewsAPI")
+                     f"📰 Filtro fundamental activo")
 
     ultima_fecha = None
 
@@ -1172,7 +1169,13 @@ def run_bot():
             logger.info(f"🎯 Decisión: {decision if decision else 'NO TRADE'}")
             logger.info(f"🧠 Razones: {', '.join(razones)}")
             logger.info(f"🔒 Filtro fundamental: {'PERMITIDO' if filtro_ok else 'BLOQUEADO'} - {motivo_filtro}")
-            logger.info(f"📊 Posiciones abiertas: {num_abiertas}/{MAX_OPEN_TRADES}")
+            logger.info(f"📊 Posiciones abiertas (memoria): {num_abiertas}/{MAX_OPEN_TRADES}")
+            # Consultar API para verificar
+            try:
+                api_pos = obtener_posiciones_abiertas()
+                logger.info(f"📊 Posiciones abiertas (API): {len(api_pos)}")
+            except:
+                pass
             logger.info(f"📰 Noticia: {titulo} (Fuente: {fuente}) | Sentimiento: {sent_label} ({sent_score:.3f})")
             logger.info("="*100)
 
