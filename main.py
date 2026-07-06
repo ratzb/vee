@@ -1,5 +1,5 @@
 # ============================================================
-# BOT TRADING V90.7 – VERSIÓN REAL (CON GRÁFICOS DE SALIDA)
+# BOT TRADING V90.8 – VERSIÓN REAL (CÓDIGO ORIGINAL + TRAILING)
 # ============================================================
 import os
 import time
@@ -38,7 +38,7 @@ SLEEP_SECONDS = 300
 
 QTY_BTC = 0.002
 TRAILING_OFFSET_ATR = 0.75
-SL_MULTIPLIER = 3.0
+SL_MULTIPLIER = 3.0  # AUMENTADO A 3.0 PARA EVITAR CIERRES PREMATUROS
 
 GRAFICO_VELAS_LIMIT = 120
 MOSTRAR_EMA20 = True
@@ -163,7 +163,10 @@ def set_leverage(symbol, leverage):
 
 def obtener_posiciones_abiertas():
     endpoint = "/v5/position/list"
-    params = {"category": "linear", "symbol": SYMBOL}
+    params = {
+        "category": "linear",
+        "symbol": SYMBOL
+    }
     result = bybit_request(endpoint, params=params)
     positions = result.get('list', [])
     abiertas = [p for p in positions if float(p.get('size', 0)) != 0]
@@ -180,7 +183,8 @@ def crear_orden_market(symbol, side, qty, reduce_only=False):
         "timeInForce": "GTC",
         "reduceOnly": reduce_only
     }
-    return bybit_request(endpoint, method='POST', payload=payload)
+    result = bybit_request(endpoint, method='POST', payload=payload)
+    return result
 
 def crear_orden_limit(symbol, side, qty, price, reduce_only=False, post_only=False):
     endpoint = "/v5/order/create"
@@ -195,11 +199,12 @@ def crear_orden_limit(symbol, side, qty, price, reduce_only=False, post_only=Fal
         "reduceOnly": reduce_only,
         "postOnly": post_only
     }
-    return bybit_request(endpoint, method='POST', payload=payload)
+    result = bybit_request(endpoint, method='POST', payload=payload)
+    return result
 
 def crear_orden_stop_market(symbol, side, qty, stop_price, reduce_only=True):
     endpoint = "/v5/order/create"
-    trigger_dir = 2 if side.capitalize() == "Sell" else 1
+    trigger_dir = 2 if side.capitalize() == "Sell" else 1 # SOLUCIÓN PARA V5
     payload = {
         "category": "linear",
         "symbol": symbol,
@@ -211,27 +216,59 @@ def crear_orden_stop_market(symbol, side, qty, stop_price, reduce_only=True):
         "triggerDirection": trigger_dir,
         "reduceOnly": reduce_only
     }
-    return bybit_request(endpoint, method='POST', payload=payload)
+    result = bybit_request(endpoint, method='POST', payload=payload)
+    return result
 
 def cancelar_orden(order_id, symbol):
     endpoint = "/v5/order/cancel"
-    payload = {"category": "linear", "symbol": symbol, "orderId": order_id}
-    return bybit_request(endpoint, method='POST', payload=payload)
+    payload = {
+        "category": "linear",
+        "symbol": symbol,
+        "orderId": order_id
+    }
+    result = bybit_request(endpoint, method='POST', payload=payload)
+    return result
 
 def modificar_orden_stop(order_id, symbol, stop_price):
     endpoint = "/v5/order/amend"
-    payload = {"category": "linear", "symbol": symbol, "orderId": order_id, "triggerPrice": str(stop_price)}
-    return bybit_request(endpoint, method='POST', payload=payload)
+    payload = {
+        "category": "linear",
+        "symbol": symbol,
+        "orderId": order_id,
+        "triggerPrice": str(stop_price)
+    }
+    result = bybit_request(endpoint, method='POST', payload=payload)
+    return result
 
 # ============================================================
 # OBTENER VELAS, INDICADORES, ESTADO
 # ============================================================
 def obtener_velas(limit=300):
     url = f"{BASE_URL}/v5/market/kline"
-    params = {"category": "linear", "symbol": SYMBOL, "interval": INTERVAL, "limit": limit}
+    params = {
+        "category": "linear",
+        "symbol": SYMBOL,
+        "interval": INTERVAL,
+        "limit": limit
+    }
     r = requests.get(url, params=params, timeout=20)
-    data_json = r.json()
+    if not r.text:
+        raise Exception("Respuesta vacía de Bybit")
+    try:
+        data_json = r.json()
+    except Exception:
+        raise Exception(f"Bybit devolvió respuesta no-JSON: {r.text}")
+    if not isinstance(data_json, dict):
+        raise Exception(f"Bybit devolvió JSON no dict: {type(data_json)}")
+    if "retCode" in data_json and data_json["retCode"] != 0:
+        raise Exception(f"Bybit Error retCode={data_json.get('retCode')} retMsg={data_json.get('retMsg')}")
+    if "result" not in data_json or not isinstance(data_json["result"], dict):
+        raise Exception(f"Respuesta inválida Bybit: {data_json}")
+    if "list" not in data_json["result"] or not isinstance(data_json["result"]["list"], list):
+        raise Exception(f"Bybit result sin 'list' o no es lista: {data_json['result']}")
     data = data_json["result"]["list"][::-1]
+    if len(data) == 0:
+        raise Exception("Bybit devolvió lista vacía de velas")
     df = pd.DataFrame(data, columns=['time','open','high','low','close','volume','turnover'])
     df[['open','high','low','close','volume']] = df[['open','high','low','close','volume']].astype(float)
     df['time'] = pd.to_datetime(df['time'].astype(np.int64), unit='ms', utc=True)
@@ -254,131 +291,256 @@ def extraer_estado_mercado(df, usar_cerrada=True):
     if usar_cerrada and len(df) < 2:
         usar_cerrada = False
     idx = -2 if usar_cerrada and len(df) >= 2 else -1
+    if idx < -len(df) or idx >= len(df):
+        idx = -1
     fila = df.iloc[idx]
     precio = fila['close']
     ema20 = df['ema20'].iloc[idx]
     atr = df['atr'].iloc[idx]
-    if pd.isna(ema20): ema20 = precio
-    if pd.isna(atr): atr = precio * 0.01
+    if pd.isna(ema20):
+        ema_serie = df['ema20'].dropna()
+        ema20 = ema_serie.iloc[-1] if not ema_serie.empty else precio
+    if pd.isna(atr):
+        atr_serie = df['atr'].dropna()
+        atr = atr_serie.iloc[-1] if not atr_serie.empty else precio * 0.01
 
     ventana = min(50, len(df))
     if ventana < 2:
-        min_50, max_50 = df['close'].min(), df['close'].max()
+        min_50 = df['close'].min()
+        max_50 = df['close'].max()
     else:
-        min_50, max_50 = df['close'].iloc[-ventana:].min(), df['close'].iloc[-ventana:].max()
+        min_50 = df['close'].iloc[-ventana:].min()
+        max_50 = df['close'].iloc[-ventana:].max()
 
-    soporte = min_50 if precio <= max_50 else max_50
-    resistencia = max_50
+    if precio > max_50:
+        soporte = max_50
+        resistencia = max_50
+    else:
+        soporte = min_50
+        resistencia = max_50
     if soporte == resistencia:
-        soporte, resistencia = precio * 0.99, precio * 1.01
+        soporte = precio * 0.99
+        resistencia = precio * 1.01
 
-    ema_nivel = 'soporte' if precio > ema20 else 'resistencia'
-    open_actual, high_actual, low_actual, close_actual = fila['open'], fila['high'], fila['low'], fila['close']
+    if precio > ema20:
+        ema_nivel = 'soporte'
+    else:
+        ema_nivel = 'resistencia'
+
+    open_actual = fila['open']
+    high_actual = fila['high']
+    low_actual = fila['low']
+    close_actual = fila['close']
     rango = high_actual - low_actual
     cuerpo = abs(close_actual - open_actual)
     cuerpo_relativo = cuerpo / rango if rango > 0 else 0.0
     sombra_superior = high_actual - max(open_actual, close_actual)
     sombra_inferior = min(open_actual, close_actual) - low_actual
 
-    patron = "Vela normal"
-    if cuerpo_relativo > 0.6: patron = "Vela alcista de cuerpo grande" if close_actual > open_actual else "Vela bajista de cuerpo grande"
-    elif sombra_inferior > 2 * cuerpo and sombra_superior < cuerpo: patron = "Martillo (posible reversión alcista)"
-    elif sombra_superior > 2 * cuerpo and sombra_inferior < cuerpo: patron = "Estrella fugaz (posible reversión bajista)"
-    elif cuerpo_relativo < 0.2 and sombra_superior > 0 and sombra_inferior > 0: patron = "Doji (indecisión)"
+    patron = ""
+    if cuerpo_relativo > 0.6:
+        if close_actual > open_actual:
+            patron = "Vela alcista de cuerpo grande"
+        else:
+            patron = "Vela bajista de cuerpo grande"
+    elif sombra_inferior > 2 * cuerpo and sombra_superior < cuerpo:
+        patron = "Martillo (posible reversión alcista)"
+    elif sombra_superior > 2 * cuerpo and sombra_inferior < cuerpo:
+        patron = "Estrella fugaz (posible reversión bajista)"
+    elif cuerpo_relativo < 0.2 and sombra_superior > 0 and sombra_inferior > 0:
+        patron = "Doji (indecisión)"
+    else:
+        patron = "Vela normal"
 
     slope, intercept, tendencia = _detectar_tendencia(df, idx)
 
-    return {
-        'precio': precio, 'ema20': ema20, 'atr': atr, 'soporte': soporte, 'resistencia': resistencia,
-        'ema_nivel': ema_nivel, 'cuerpo_relativo': cuerpo_relativo, 'patron': patron,
-        'slope': slope, 'intercept': intercept, 'tendencia': tendencia,
+    estado = {
+        'precio': precio,
+        'ema20': ema20,
+        'atr': atr,
+        'soporte': soporte,
+        'resistencia': resistencia,
+        'ema_nivel': ema_nivel,
+        'cuerpo_relativo': cuerpo_relativo,
+        'patron': patron,
+        'slope': slope,
+        'intercept': intercept,
+        'tendencia': tendencia,
         'sentimiento': 1 if slope > 0.02 else (-1 if slope < -0.02 else 0),
-        'fecha': df.index[idx], 'open': open_actual, 'high': high_actual, 'low': low_actual,
-        'close': close_actual, 'sombra_superior': sombra_superior, 'sombra_inferior': sombra_inferior, 'idx': idx
+        'fecha': df.index[idx],
+        'open': open_actual,
+        'high': high_actual,
+        'low': low_actual,
+        'close': close_actual,
+        'sombra_superior': sombra_superior,
+        'sombra_inferior': sombra_inferior,
+        'idx': idx
     }
+    return estado
 
 def _detectar_tendencia(df, idx, ventana=80):
+    if idx < 0:
+        idx = len(df) + idx
+    if idx < 0:
+        idx = 0
+    if idx >= len(df):
+        idx = len(df) - 1
     inicio = max(0, idx - ventana + 1)
+    if inicio > idx:
+        inicio = idx
     y = df['close'].values[inicio:idx+1]
-    if len(y) < 2: return 0, 0, "➡️ LATERAL"
+    if len(y) < 2:
+        return 0, 0, "➡️ LATERAL"
     x = np.arange(len(y))
     slope, intercept, r, _, _ = linregress(x, y)
-    direccion = '📈 ALCISTA' if slope > 0.02 else ('📉 BAJISTA' if slope < -0.02 else '➡️ LATERAL')
+    if slope > 0.02:
+        direccion = '📈 ALCISTA'
+    elif slope < -0.02:
+        direccion = '📉 BAJISTA'
+    else:
+        direccion = '➡️ LATERAL'
     return slope, intercept, direccion
 
 def extraer_estado_mercado_por_indice(df, idx):
-    if df.empty or idx < 0 or idx >= len(df): return None
-    return extraer_estado_mercado(df.iloc[:idx+1], usar_cerrada=False)
+    if df.empty:
+        return None
+    if idx < 0:
+        idx = len(df) + idx
+    if idx < 0 or idx >= len(df):
+        return None
+    df_temp = df.iloc[:idx+1]
+    if df_temp.empty:
+        return None
+    return extraer_estado_mercado(df_temp, usar_cerrada=False)
 
 # ============================================================
 # PATRONES Y MOTOR DE DECISIÓN
 # ============================================================
 def detectar_patron_multivela(df, n=3):
-    if len(df) < n: return None, ""
-    closes, opens = df['close'].iloc[-n:].values, df['open'].iloc[-n:].values
-    if all(closes[i] > opens[i] and closes[i] > closes[i-1] for i in range(1, n)): return "tres_soldados_blancos", "Alcista fuerte (continuación)"
-    if all(closes[i] < opens[i] and closes[i] < closes[i-1] for i in range(1, n)): return "tres_cuervos_negros", "Bajista fuerte (continuación)"
+    if len(df) < n:
+        return None, ""
+    closes = df['close'].iloc[-n:].values
+    opens = df['open'].iloc[-n:].values
+    if all(closes[i] > opens[i] and closes[i] > closes[i-1] for i in range(1, n)):
+        return "tres_soldados_blancos", "Alcista fuerte (continuación)"
+    if all(closes[i] < opens[i] and closes[i] < closes[i-1] for i in range(1, n)):
+        return "tres_cuervos_negros", "Bajista fuerte (continuación)"
     return None, ""
 
+def confirmar_patron(estado_ant, estado_act):
+    if estado_ant['patron'] == "Martillo (posible reversión alcista)" and estado_act['close'] > estado_ant['close']:
+        return True, "Martillo confirmado (alcista)"
+    if estado_ant['patron'] == "Estrella fugaz (posible reversión bajista)" and estado_act['close'] < estado_ant['close']:
+        return True, "Estrella fugaz confirmada (bajista)"
+    return False, ""
+
 def motor_v90(estado_actual, df):
-    if estado_actual is None: return None, 0, 0, ["Estado nulo"]
-    precio, soporte, resistencia, atr = estado_actual['precio'], estado_actual['soporte'], estado_actual['resistencia'], estado_actual['atr']
-    tendencia, ema20, ema_nivel, patron = estado_actual['tendencia'], estado_actual['ema20'], estado_actual['ema_nivel'], estado_actual['patron']
+    if estado_actual is None:
+        return None, 0, 0, ["Estado nulo"]
+    precio = estado_actual['precio']
+    soporte = estado_actual['soporte']
+    resistencia = estado_actual['resistencia']
+    atr = estado_actual['atr']
+    tendencia = estado_actual['tendencia']
+    ema20 = estado_actual['ema20']
+    ema_nivel = estado_actual['ema_nivel']
+    patron = estado_actual['patron']
     razones = []
 
     patron_mult, desc_mult = detectar_patron_multivela(df)
     if patron_mult == "tres_soldados_blancos" and tendencia in ['📈 ALCISTA', '➡️ LATERAL']:
-        razones.extend([desc_mult, "Tres soldados blancos en tendencia favorable"])
+        razones.append(desc_mult)
+        razones.append("Tres soldados blancos en tendencia favorable")
         return 'Buy', soporte, resistencia, razones
     if patron_mult == "tres_cuervos_negros" and tendencia in ['📉 BAJISTA', '➡️ LATERAL']:
-        razones.extend([desc_mult, "Tres cuervos negros en tendencia favorable"])
+        razones.append(desc_mult)
+        razones.append("Tres cuervos negros en tendencia favorable")
         return 'Sell', soporte, resistencia, razones
 
-    if "Martillo" in patron and (tendencia == '📉 BAJISTA' or abs(precio - soporte) < atr):
-        razones.extend([f"Reversión alcista: {patron}", f"Contexto: {tendencia} | cerca soporte {soporte:.2f}"])
-        return 'Buy', soporte, resistencia, razones
-    if "Estrella fugaz" in patron and (tendencia == '📈 ALCISTA' or abs(precio - resistencia) < atr):
-        razones.extend([f"Reversión bajista: {patron}", f"Contexto: {tendencia} | cerca resistencia {resistencia:.2f}"])
-        return 'Sell', soporte, resistencia, razones
+    if "Martillo" in patron:
+        if tendencia == '📉 BAJISTA' or abs(precio - soporte) < atr:
+            razones.append(f"Patrón de reversión alcista: {patron}")
+            razones.append(f"Contexto: {tendencia} | cerca de soporte {soporte:.2f}")
+            return 'Buy', soporte, resistencia, razones
+    if "Estrella fugaz" in patron:
+        if tendencia == '📈 ALCISTA' or abs(precio - resistencia) < atr:
+            razones.append(f"Patrón de reversión bajista: {patron}")
+            razones.append(f"Contexto: {tendencia} | cerca de resistencia {resistencia:.2f}")
+            return 'Sell', soporte, resistencia, razones
 
-    dist_soporte, dist_resistencia = abs(precio - soporte), abs(precio - resistencia)
+    confirmado = False
+    msg_conf = ""
+    estado_ant = None
+    if len(df) >= 3:
+        if estado_actual['idx'] == -2:
+            idx_ant = -3
+        else:
+            idx_ant = -2
+        estado_ant = extraer_estado_mercado_por_indice(df, idx_ant)
+        if estado_ant:
+            confirmado, msg_conf = confirmar_patron(estado_ant, estado_actual)
+            if confirmado:
+                razones.append(msg_conf)
+                if "Martillo" in estado_ant['patron'] and estado_actual['close'] > estado_ant['close']:
+                    return 'Buy', soporte, resistencia, razones
+                if "Estrella fugaz" in estado_ant['patron'] and estado_actual['close'] < estado_ant['close']:
+                    return 'Sell', soporte, resistencia, razones
+
+    dist_soporte = abs(precio - soporte)
+    dist_resistencia = abs(precio - resistencia)
+
     if dist_soporte < 0.5 * atr:
         senal_bajista_fuerte = False
-        if patron == "Vela bajista de cuerpo grande" and estado_actual['close'] < estado_actual['open']: senal_bajista_fuerte = True
-        if "estrella fugaz" in patron.lower() and estado_actual['close'] < estado_actual['open']: senal_bajista_fuerte = True
-        if tendencia == '📉 BAJISTA' and estado_actual['close'] < soporte: senal_bajista_fuerte = True
-        
+        if patron == "Vela bajista de cuerpo grande" and estado_actual['close'] < estado_actual['open']:
+            senal_bajista_fuerte = True
+            razones.append("Vela bajista de cuerpo grande en soporte → posible ruptura")
+        if "estrella fugaz" in patron.lower() and estado_actual['close'] < estado_actual['open']:
+            senal_bajista_fuerte = True
+            razones.append("Estrella fugaz en soporte → señal bajista")
+        if tendencia == '📉 BAJISTA' and estado_actual['close'] < soporte:
+            senal_bajista_fuerte = True
+            razones.append("Cierre por debajo del soporte → ruptura bajista")
         if senal_bajista_fuerte:
             razones.append("Señal bajista fuerte en soporte → NO COMPRAMOS")
             if estado_actual['close'] < soporte - 0.3 * atr:
                 razones.append("Ruptura confirmada del soporte → SELL")
                 return 'Sell', soporte, resistencia, razones
+            else:
+                razones.append("Esperar confirmación de ruptura")
+                return None, soporte, resistencia, razones
         else:
-            razones.append(f"Precio cerca de soporte ({soporte:.2f}) sin señales bajistas → BUY")
+            razones.append(f"Precio cerca de soporte ({soporte:.2f}) sin señales bajistas fuertes → BUY")
             return 'Buy', soporte, resistencia, razones
 
     if dist_resistencia < 0.5 * atr:
         senal_alcista_fuerte = False
-        if patron == "Vela alcista de cuerpo grande" and estado_actual['close'] > estado_actual['open']: senal_alcista_fuerte = True
-        if "martillo" in patron.lower() and estado_actual['close'] > estado_actual['open']: senal_alcista_fuerte = True
-        if tendencia == '📈 ALCISTA' and estado_actual['close'] > resistencia: senal_alcista_fuerte = True
-        
+        if patron == "Vela alcista de cuerpo grande" and estado_actual['close'] > estado_actual['open']:
+            senal_alcista_fuerte = True
+            razones.append("Vela alcista de cuerpo grande en resistencia → posible ruptura")
+        if "martillo" in patron.lower() and estado_actual['close'] > estado_actual['open']:
+            senal_alcista_fuerte = True
+            razones.append("Martillo en resistencia → señal alcista")
+        if tendencia == '📈 ALCISTA' and estado_actual['close'] > resistencia:
+            senal_alcista_fuerte = True
+            razones.append("Cierre por encima de resistencia → ruptura alcista")
         if senal_alcista_fuerte:
             razones.append("Señal alcista fuerte en resistencia → NO VENDEMOS")
             if estado_actual['close'] > resistencia + 0.3 * atr:
                 razones.append("Ruptura confirmada de resistencia → BUY")
                 return 'Buy', soporte, resistencia, razones
+            else:
+                razones.append("Esperar confirmación de ruptura")
+                return None, soporte, resistencia, razones
         else:
-            razones.append(f"Precio cerca de resistencia ({resistencia:.2f}) sin señales alcistas → SELL")
+            razones.append(f"Precio cerca de resistencia ({resistencia:.2f}) sin señales alcistas fuertes → SELL")
             return 'Sell', soporte, resistencia, razones
 
     if ema_nivel == 'resistencia' and abs(precio - ema20) < atr * 0.5 and tendencia != '📈 ALCISTA':
-        razones.append(f"Rebote bajista en EMA20 ({ema20:.2f})")
+        razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde abajo (EMA actúa como resistencia)")
         return 'Sell', soporte, resistencia, razones
     if ema_nivel == 'soporte' and abs(precio - ema20) < atr * 0.5 and tendencia != '📉 BAJISTA':
-        razones.append(f"Rebote alcista en EMA20 ({ema20:.2f})")
+        razones.append(f"Precio tocando EMA20 ({ema20:.2f}) desde arriba (EMA actúa como soporte)")
         return 'Buy', soporte, resistencia, razones
-
     if estado_actual['close'] > ema20 and estado_actual['open'] < ema20 and estado_actual['close'] > estado_actual['open']:
         razones.append(f"Ruptura alcista de EMA20 ({ema20:.2f})")
         return 'Buy', soporte, resistencia, razones
@@ -395,41 +557,141 @@ def motor_v90(estado_actual, df):
 def actualizar_cache_noticias():
     global NEWS_CACHE
     ahora = datetime.now(timezone.utc)
-    if NEWS_CACHE["timestamp"] is not None and (ahora - NEWS_CACHE["timestamp"]).total_seconds() < NEWS_CACHE_TTL: return
+    if NEWS_CACHE["timestamp"] is not None:
+        edad = (ahora - NEWS_CACHE["timestamp"]).total_seconds()
+        if edad < NEWS_CACHE_TTL:
+            logger.debug(f"Usando caché de noticias (edad: {edad:.0f}s)")
+            return
     logger.info("⏳ Actualizando caché de noticias...")
-    titulo, fuente, sent_label, sent_score = "No disponible", "Ninguna", "Neutral", 0.0
-    NEWS_CACHE = {"titulo": titulo, "fuente": fuente, "sent_label": sent_label, "sent_score": sent_score, "timestamp": ahora}
+    titulo, fuente, sent_label, sent_score = _obtener_noticias_frescas()
+    NEWS_CACHE = {
+        "titulo": titulo,
+        "fuente": fuente,
+        "sent_label": sent_label,
+        "sent_score": sent_score,
+        "timestamp": ahora
+    }
+    logger.info(f"✅ Caché actualizada: {titulo} | {sent_label} ({sent_score:.3f})")
+
+def _obtener_noticias_frescas():
+    noticias = []
+    fuente = "Ninguna"
+    if NEWS_API_KEY:
+        try:
+            url = "https://newsapi.org/v2/everything"
+            params = {
+                "q": "BTC OR Bitcoin OR Cryptocurrency",
+                "language": "en",
+                "sortBy": "publishedAt",
+                "pageSize": 20,
+                "apiKey": NEWS_API_KEY
+            }
+            r = requests.get(url, params=params, timeout=10)
+            if r.status_code == 200:
+                data = r.json()
+                if data.get("status") == "ok" and data.get("articles"):
+                    noticias = data["articles"]
+                    fuente = "NewsAPI"
+                    logger.info(f"📰 Obtenidas {len(noticias)} noticias desde NewsAPI")
+        except Exception as e:
+            logger.error(f"Error en NewsAPI: {e}")
+    if not noticias:
+        try:
+            rss_url = "https://news.google.com/rss/search?q=Bitcoin+OR+Cryptocurrency&hl=en-US&gl=US&ceid=US:en"
+            r = requests.get(rss_url, timeout=10)
+            if r.status_code == 200:
+                root = ET.fromstring(r.content)
+                items = root.findall("./channel/item")
+                for item in items[:20]:
+                    title = item.find("title").text if item.find("title") is not None else ""
+                    if title:
+                        noticias.append({
+                            "title": title,
+                            "source": {"name": "Google News"}
+                        })
+                fuente = "Google News RSS"
+                logger.info(f"📰 Obtenidas {len(noticias)} noticias desde Google News RSS")
+        except Exception as e:
+            logger.error(f"Error en Google News RSS: {e}")
+    if noticias:
+        titulo = noticias[0].get("title", "No disponible")
+        fuente = noticias[0].get("source", {}).get("name", fuente)
+        scores = []
+        for n in noticias:
+            t = n.get("title", "")
+            if t:
+                scores.append(sentiment_analyzer.polarity_scores(t)["compound"])
+        if scores:
+            sent_score = sum(scores) / len(scores)
+            if sent_score > 0.05:
+                sent_label = "Bullish"
+            elif sent_score < -0.05:
+                sent_label = "Bearish"
+            else:
+                sent_label = "Neutral"
+        else:
+            sent_label = "Neutral"
+            sent_score = 0.0
+        return titulo, fuente, sent_label, sent_score
+    return "No disponible", "Ninguna", "Neutral", 0.0
 
 def obtener_noticias_y_sentimiento():
     actualizar_cache_noticias()
-    return NEWS_CACHE["titulo"], NEWS_CACHE["fuente"], NEWS_CACHE["sent_label"], NEWS_CACHE["sent_score"]
+    return (
+        NEWS_CACHE["titulo"],
+        NEWS_CACHE["fuente"],
+        NEWS_CACHE["sent_label"],
+        NEWS_CACHE["sent_score"]
+    )
 
 def filtrar_por_fundamental(decision, sent_label, estado):
-    return True, "Filtro fundamental omitido / Permitido"
+    if decision is None:
+        return True, "Sin decisión"
+    precio = estado['precio']
+    soporte = estado['soporte']
+    resistencia = estado['resistencia']
+    atr = estado['atr']
+    dist_soporte = abs(precio - soporte)
+    dist_resistencia = abs(precio - resistencia)
+    en_soporte = dist_soporte < 0.5 * atr
+    en_resistencia = dist_resistencia < 0.5 * atr
+    if decision == 'Buy' and sent_label == 'Bearish':
+        if en_soporte:
+            return True, f"BUY en soporte a pesar de sentimiento bajista (soporte {soporte:.2f})"
+        else:
+            return False, f"Sentimiento bajista bloquea BUY (no está en soporte)"
+    if decision == 'Sell' and sent_label == 'Bullish':
+        if en_resistencia:
+            return True, f"SELL en resistencia a pesar de sentimiento alcista (resistencia {resistencia:.2f})"
+        else:
+            return False, f"Sentimiento alcista bloquea SELL (no está en resistencia)"
+    return True, f"Sentimiento permitido ({sent_label})"
 
 # ============================================================
-# GRÁFICO MEJORADO (ENTRADAS Y SALIDAS)
+# GRÁFICO MEJORADO (Muestra Entrada y Salida conectadas)
 # ============================================================
-def generar_grafico_trade(df, decision, soporte, resistencia, slope, intercept, razones, estado, precio_entrada, precio_salida=None, tiempo_entrada=None, trade_id=None, motivo_cierre=None):
+def generar_grafico_trade(df, decision, soporte, resistencia, slope, intercept, razones, estado, precio_entrada, precio_salida=None, tiempo_entrada=None, trade_id=None, motivo_cierre=""):
     if df.empty or estado is None:
         return None
     try:
         plt.style.use('dark_background')
         df_plot = df.copy().tail(GRAFICO_VELAS_LIMIT)
-        if df_plot.empty: return None
-        
+        if df_plot.empty:
+            return None
         times = df_plot.index
-        opens, highs, lows, closes = df_plot['open'].values, df_plot['high'].values, df_plot['low'].values, df_plot['close'].values
+        opens = df_plot['open'].values
+        highs = df_plot['high'].values
+        lows = df_plot['low'].values
+        closes = df_plot['close'].values
         x = np.arange(len(df_plot))
-        
         fig, ax = plt.subplots(figsize=(14, 7), facecolor='black')
         ax.set_facecolor('black')
         
-        # Dibujar velas
         for i in range(len(df_plot)):
             color = 'lime' if closes[i] >= opens[i] else 'red'
             ax.vlines(x[i], lows[i], highs[i], color=color, linewidth=1)
-            cuerpo_y, cuerpo_h = min(opens[i], closes[i]), max(abs(closes[i] - opens[i]), 0.0001)
+            cuerpo_y = min(opens[i], closes[i])
+            cuerpo_h = max(abs(closes[i] - opens[i]), 0.0001)
             rect = plt.Rectangle((x[i] - 0.3, cuerpo_y), 0.6, cuerpo_h, color=color, alpha=0.9)
             ax.add_patch(rect)
             
@@ -438,7 +700,13 @@ def generar_grafico_trade(df, decision, soporte, resistencia, slope, intercept, 
         if MOSTRAR_EMA20 and 'ema20' in df_plot.columns:
             ax.plot(x, df_plot['ema20'].values, color='yellow', linewidth=2, label='EMA20')
 
-        # Buscar posición X de la entrada
+        y_plot = df_plot['close'].values
+        x_plot = np.arange(len(y_plot))
+        slope_plot, intercept_plot, r_plot, _, _ = linregress(x_plot, y_plot)
+        tendencia_linea = intercept_plot + slope_plot * x_plot
+        ax.plot(x_plot, tendencia_linea, color='white', linewidth=1.5, linestyle='-', label=f"Tendencia")
+
+        # Localizar el X de entrada
         entrada_x = 0
         if tiempo_entrada is not None and tiempo_entrada in times:
             entrada_x = np.where(times == tiempo_entrada)[0][0]
@@ -451,33 +719,35 @@ def generar_grafico_trade(df, decision, soporte, resistencia, slope, intercept, 
         else:
             ax.scatter(entrada_x, precio_entrada, s=250, marker='v', color='red', edgecolors='black', linewidths=2, label='Entrada SELL', zorder=5)
 
-        # Dibujar Salida y línea de conexión
+        # Dibujar Salida
         if precio_salida is not None:
             salida_x = len(df_plot) - 1
             pnl_indicador = (precio_salida - precio_entrada) if decision == 'Buy' else (precio_entrada - precio_salida)
             color_salida = 'lime' if pnl_indicador > 0 else ('red' if pnl_indicador < 0 else 'yellow')
             
-            ax.scatter(salida_x, precio_salida, s=250, marker='X', color=color_salida, edgecolors='white', linewidths=1.5, label='Cierre', zorder=6)
+            ax.scatter(salida_x, precio_salida, s=250, marker='X', color=color_salida, edgecolors='white', linewidths=1.5, label='Salida', zorder=6)
+            # Línea conectora
             ax.plot([entrada_x, salida_x], [precio_entrada, precio_salida], color='white', linestyle=':', linewidth=2, alpha=0.7)
 
-        # Textos informativos
         id_text = f" ID: {trade_id}" if trade_id else ""
         texto = (
             f"{decision.upper()}{id_text}\n"
-            f"Entrada: {precio_entrada:.2f}\n"
+            f"Precio entrada: {precio_entrada:.2f}\n"
+            f"Hora: {times[-1].strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
             f"EMA20: {estado['ema20']:.2f}  ATR: {estado['atr']:.2f}\n"
+            f"Patrón: {estado['patron']}\n"
             f"Razones: {', '.join(razones)}"
         )
         if precio_salida is not None:
             texto += f"\nSalida: {precio_salida:.2f}\nMotivo: {motivo_cierre}"
             
-        ax.text(0.02, 0.98, texto, transform=ax.transAxes, fontsize=10, verticalalignment='top', color='white',
+        ax.text(0.02, 0.98, texto, transform=ax.transAxes, fontsize=9, verticalalignment='top', color='white',
                 bbox=dict(facecolor='black', alpha=0.7, boxstyle='round'))
         
-        titulo_graf = f"{SYMBOL} - Velas {INTERVAL}m - {'Entrada' if precio_salida is None else 'Cierre de Posición'}"
-        ax.set_title(titulo_graf, color='white')
+        ax.set_title(f"{SYMBOL} - Velas {INTERVAL}m - {'Entrada' if precio_salida is None else 'Cierre'}", color='white')
+        ax.set_xlabel("Velas", color='white')
+        ax.set_ylabel("Precio", color='white')
         ax.grid(True, alpha=0.2, color='gray')
-        
         step = max(1, int(len(df_plot) / 10))
         ax.set_xticks(x[::step])
         ax.set_xticklabels([t.strftime('%H:%M') for t in times[::step]], rotation=45, color='white')
@@ -490,55 +760,111 @@ def generar_grafico_trade(df, decision, soporte, resistencia, slope, intercept, 
         return None
 
 # ============================================================
-# GESTIÓN DE POSICIONES REALES
+# GESTIÓN DE POSICIONES REALES (CON TRAILING OPCIÓN A)
 # ============================================================
+
 def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, tiempo, estado, df):
     global TRADE_COUNTER, ACTIVE_TRADES
 
-    if len(ACTIVE_TRADES) >= MAX_OPEN_TRADES: return None
+    if len(ACTIVE_TRADES) >= MAX_OPEN_TRADES:
+        return None
 
     qty = QTY_BTC
     side = "Buy" if decision == "Buy" else "Sell"
 
+    logger.info(f"Enviando orden {side} Market por {qty} BTC...")
     try:
         crear_orden_market(SYMBOL, side, qty, reduce_only=False)
         time.sleep(2)
-        pos_actual = next((p for p in obtener_posiciones_abiertas() if p.get('side') == side.capitalize()), None)
-        if not pos_actual: raise Exception("No se encontró la posición recién abierta")
+        posiciones = obtener_posiciones_abiertas()
+        pos_actual = None
+        for p in posiciones:
+            if p.get('side') == side.capitalize() and float(p.get('size', 0)) > 0:
+                pos_actual = p
+                break
+        if not pos_actual:
+            raise Exception("No se encontró la posición recién abierta")
         entry_price = float(pos_actual.get('avgPrice', precio))
+        logger.info(f"Entrada ejecutada a {entry_price:.2f}")
     except Exception as e:
         logger.error(f"Error abriendo posición: {e}")
         return None
 
+    # Calcular SL, TP1 y "TP2 virtual"
     if decision == "Buy":
         sl_price = round(entry_price - SL_MULTIPLIER * atr, 2)
         tp1_price = round(min(resistencia, entry_price + 2.0 * atr), 2)
         tp2_price = round(entry_price + 3.5 * atr, 2)
-        if tp1_price <= entry_price: tp1_price = round(entry_price + 2.0 * atr, 2)
     else:
         sl_price = round(entry_price + SL_MULTIPLIER * atr, 2)
         tp1_price = round(max(soporte, entry_price - 2.0 * atr), 2)
         tp2_price = round(entry_price - 3.5 * atr, 2)
-        if tp1_price >= entry_price: tp1_price = round(entry_price - 2.0 * atr, 2)
 
-    try: tp1_order_id = crear_orden_limit(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty / 2, tp1_price, reduce_only=True).get('orderId')
-    except: tp1_order_id = None
+    if decision == "Buy" and sl_price >= entry_price:
+        crear_orden_market(SYMBOL, 'Sell', qty, reduce_only=True)
+        return None
+    if decision == "Sell" and sl_price <= entry_price:
+        crear_orden_market(SYMBOL, 'Buy', qty, reduce_only=True)
+        return None
 
-    try: sl_order_id = crear_orden_stop_market(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty, sl_price, reduce_only=True).get('orderId')
-    except: sl_order_id = None
+    if decision == "Buy" and tp1_price <= entry_price:
+        tp1_price = round(entry_price + 2.0 * atr, 2)
+    if decision == "Sell" and tp1_price >= entry_price:
+        tp1_price = round(entry_price - 2.0 * atr, 2)
+
+    # Orden Limit para asegurar la mitad (TP1)
+    qty_half = qty / 2
+    try:
+        tp1_order = crear_orden_limit(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty_half, tp1_price, reduce_only=True)
+        tp1_order_id = tp1_order.get('orderId')
+    except Exception as e:
+        logger.error(f"Error creando TP1: {e}")
+        tp1_order_id = None
+
+    # Orden Stop Market para el Stop Loss Inicial
+    try:
+        sl_order = crear_orden_stop_market(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty, sl_price, reduce_only=True)
+        sl_order_id = sl_order.get('orderId')
+    except Exception as e:
+        logger.error(f"Error creando SL: {e}")
+        sl_order_id = None
 
     TRADE_COUNTER += 1
+    trade_id = TRADE_COUNTER
     trade_info = {
-        'trade_id': TRADE_COUNTER, 'side': side, 'entry_price': entry_price, 'qty_total': qty, 'qty_remaining': qty,
-        'sl_price': sl_price, 'tp1_price': tp1_price, 'tp2_price': tp2_price, 'status': 'ACTIVE',
-        'order_id_sl': sl_order_id, 'order_id_tp1': tp1_order_id, 'order_id_tp2': None,
-        'razones': razones, 'estado_entrada': estado.copy(), 'timestamp': tiempo
+        'trade_id': trade_id,
+        'side': side,
+        'entry_price': entry_price,
+        'qty_total': qty,
+        'qty_remaining': qty,
+        'sl_price': sl_price,
+        'tp1_price': tp1_price,
+        'tp2_price': tp2_price,  # Solo se usa como gatillo para empezar a hacer Trailing
+        'status': 'ACTIVE',
+        'order_id_sl': sl_order_id,
+        'order_id_tp1': tp1_order_id,
+        'razones': razones,
+        'estado_entrada': estado.copy(),
+        'timestamp': tiempo
     }
     ACTIVE_TRADES.append(trade_info)
 
-    telegram_mensaje(f"📌 ENTRADA REAL #{TRADE_COUNTER} {decision}\n💰 Precio: {entry_price:.2f}\n📍 SL: {sl_price:.2f} | TP1: {tp1_price:.2f}\n🧠 " + "\n• ".join(razones))
+    pnl_flotante = (entry_price - precio) * qty if decision == 'Buy' else (precio - entry_price) * qty
+    mensaje_entrada = (
+        f"📌 ENTRADA REAL #{trade_id} {decision}\n"
+        f"💰 Precio: {entry_price:.2f}\n"
+        f"📍 SL Inicial: {sl_price:.2f} | TP1 (50%): {tp1_price:.2f}\n"
+        f"📦 Cantidad: {qty:.6f} BTC\n"
+        f"📈 PnL flotante: {pnl_flotante:.4f} USD\n"
+        f"🧠 Razones:\n• " + "\n• ".join(razones)
+    )
+    telegram_mensaje(mensaje_entrada)
 
-    fig = generar_grafico_trade(df, decision, soporte, resistencia, estado['slope'], estado['intercept'], razones, estado, precio_entrada=entry_price, tiempo_entrada=tiempo, trade_id=TRADE_COUNTER)
+    fig = generar_grafico_trade(
+        df=df, decision=decision, soporte=soporte, resistencia=resistencia, 
+        slope=estado['slope'], intercept=estado['intercept'], razones=razones, 
+        estado=estado, precio_entrada=entry_price, tiempo_entrada=tiempo, trade_id=trade_id
+    )
     if fig:
         telegram_grafico(fig)
         plt.close(fig)
@@ -547,40 +873,62 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
 
 def actualizar_estadisticas(pnl):
     global TRADES_TOTALES, TRADES_WIN, TRADES_LOSS, PNL_GLOBAL
-    TRADES_TOTALES += 1; PNL_GLOBAL += pnl
-    if pnl > 0: TRADES_WIN += 1
-    else: TRADES_LOSS += 1
+    TRADES_TOTALES += 1
+    PNL_GLOBAL += pnl
+    if pnl > 0:
+        TRADES_WIN += 1
+    else:
+        TRADES_LOSS += 1
 
 def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_fuente, sent_label, sent_score):
     global ACTIVE_TRADES
-    pos_map = {p.get('side', '').lower(): p for p in obtener_posiciones_abiertas() if float(p.get('size', 0)) != 0}
+
+    posiciones_api = obtener_posiciones_abiertas()
+    pos_map = {}
+    for p in posiciones_api:
+        side = p.get('side', '').lower()
+        if float(p.get('size', 0)) != 0:
+            pos_map[side] = p
+
     trades_a_remover = []
 
     for idx, trade in enumerate(ACTIVE_TRADES):
-        side, entry, qty_remaining, status = trade['side'], trade['entry_price'], trade['qty_remaining'], trade['status']
-        trade_id, tp1_price, tp2_price, sl_price = trade['trade_id'], trade['tp1_price'], trade['tp2_price'], trade['sl_price']
+        trade_id = trade['trade_id']
+        side = trade['side']
+        entry = trade['entry_price']
+        qty_total = trade['qty_total']
+        qty_remaining = trade['qty_remaining']
+        sl_price = trade['sl_price']
+        tp1_price = trade['tp1_price']
+        tp2_price = trade['tp2_price']
+        status = trade['status']
+        order_id_sl = trade['order_id_sl']
+        atr = trade['estado_entrada']['atr']
+
         pos_api = pos_map.get(side.lower())
+        size_actual = float(pos_api.get('size', 0)) if pos_api else 0.0
 
-        # ==========================================
-        # 1. CIERRE TOTAL DETECTADO (No está en la API)
-        # ==========================================
-        if not pos_api or float(pos_api.get('size', 0)) == 0:
+        # =========================================================
+        # 1. CIERRE TOTAL DETECTADO (API dice que ya no hay tamaño)
+        # =========================================================
+        if size_actual == 0:
             if qty_remaining > 0:
-                exit_price = sl_price
-                if status == 'ACTIVE':
-                    motivo, icono = "Stop Loss Original", "🔴"
-                elif status == 'TP1_HIT':
-                    motivo, icono = "Stop Loss (BreakEven)", "🟡"
-                elif status == 'TP2_HIT':
-                    motivo, icono = "Trailing Stop Loss", "🟢"
-                else:
-                    motivo, icono, exit_price = "Desconocido/Manual", "⚪", precio_actual
+                # Determinar motivo
+                if status == 'ACTIVE': 
+                    motivo, icono = "🔴 Stop Loss Original", "🔴"
+                elif status == 'TP1_HIT': 
+                    motivo, icono = "🟡 Stop Loss BreakEven", "🟡"
+                elif status == 'TRAILING': 
+                    motivo, icono = "🟢 Trailing Stop Loss", "🟢"
+                else: 
+                    motivo, icono = "⚪ Cierre Desconocido", "⚪"
 
+                exit_price = sl_price # Asumimos que cerró al precio del Stop vigente
                 pnl = (exit_price - entry) * qty_remaining if side == 'Buy' else (entry - exit_price) * qty_remaining
                 actualizar_estadisticas(pnl)
 
                 mensaje = (
-                    f"{icono} POSICIÓN #{trade_id} CERRADA TOTALMENTE\n"
+                    f"{icono} CIERRE FINAL #{trade_id}\n"
                     f"📝 Motivo: {motivo}\n"
                     f"🎯 Precio Entrada: {entry:.2f}\n"
                     f"🛑 Precio Salida: {exit_price:.2f}\n"
@@ -589,9 +937,10 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                 telegram_mensaje(mensaje)
 
                 fig = generar_grafico_trade(
-                    df_actual, side, trade['estado_entrada']['soporte'], trade['estado_entrada']['resistencia'], 
-                    trade['estado_entrada']['slope'], trade['estado_entrada']['intercept'], trade['razones'], 
-                    trade['estado_entrada'], precio_entrada=entry, precio_salida=exit_price, 
+                    df=df_actual, decision=side, soporte=trade['estado_entrada']['soporte'], 
+                    resistencia=trade['estado_entrada']['resistencia'], slope=trade['estado_entrada']['slope'], 
+                    intercept=trade['estado_entrada']['intercept'], razones=trade['razones'], 
+                    estado=trade['estado_entrada'], precio_entrada=entry, precio_salida=exit_price, 
                     tiempo_entrada=trade['timestamp'], trade_id=trade_id, motivo_cierre=motivo
                 )
                 if fig:
@@ -601,109 +950,192 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
             trades_a_remover.append(idx)
             continue
 
-        # ==========================================
-        # 2. ACTIVE: Buscando TP1
-        # ==========================================
+        # =========================================================
+        # 2. STATUS ACTIVE: Buscar TP1 o validar si Bybit ya lo ejecutó
+        # =========================================================
         if status == 'ACTIVE':
-            if (side == 'Buy' and precio_actual >= tp1_price) or (side == 'Sell' and precio_actual <= tp1_price):
-                qty_cerrar = trade['qty_total'] / 2
-                if qty_cerrar > qty_remaining: qty_cerrar = qty_remaining
-                if qty_cerrar > 0:
+            # Si el tamaño actual bajó a la mitad, significa que Bybit ejecutó nuestra orden Limit del TP1
+            tp1_alcanzado = False
+            if size_actual <= qty_total * 0.6: 
+                tp1_alcanzado = True
+            elif (side == 'Buy' and precio_actual >= tp1_price) or (side == 'Sell' and precio_actual <= tp1_price):
+                # O si el precio tocó pero no ha actualizado el size, forzamos cierre parcial
+                qty_cerrar = qty_total / 2
+                crear_orden_market(SYMBOL, 'Sell' if side == 'Buy' else 'Buy', qty_cerrar, reduce_only=True)
+                size_actual = qty_total - qty_cerrar
+                tp1_alcanzado = True
+
+            if tp1_alcanzado:
+                trade['qty_remaining'] = size_actual
+                pnl_parcial = (tp1_price - entry) * (qty_total - size_actual) if side == 'Buy' else (entry - tp1_price) * (qty_total - size_actual)
+                actualizar_estadisticas(pnl_parcial)
+
+                # Mover SL a BreakEven (Entry)
+                if order_id_sl:
+                    try: cancelar_orden(order_id_sl, SYMBOL)
+                    except: pass
+                try:
+                    new_sl_order = crear_orden_stop_market(SYMBOL, 'Sell' if side == 'Buy' else 'Buy', trade['qty_remaining'], entry, reduce_only=True)
+                    trade['order_id_sl'] = new_sl_order.get('orderId')
+                except Exception as e:
+                    logger.error(f"Error creando nuevo SL (BE): {e}")
+
+                trade['status'] = 'TP1_HIT'
+                trade['sl_price'] = entry
+
+                mensaje = (
+                    f"🔓 CIERRE PARCIAL #{trade_id} - TP1 alcanzado\n"
+                    f"💰 Precio: {tp1_price:.2f}\n"
+                    f"📊 PnL Parcial: {pnl_parcial:.4f} USD\n"
+                    f"🔄 SL movido a BE ({entry:.2f})\n"
+                    f"🎯 Esperando que cruce {tp2_price:.2f} para activar Trailing Infinito..."
+                )
+                telegram_mensaje(mensaje)
+
+                fig = generar_grafico_trade(
+                    df_actual, side, trade['estado_entrada']['soporte'], trade['estado_entrada']['resistencia'], 
+                    trade['estado_entrada']['slope'], trade['estado_entrada']['intercept'], trade['razones'], 
+                    trade['estado_entrada'], entry, precio_salida=tp1_price, tiempo_entrada=trade['timestamp'], 
+                    trade_id=trade_id, motivo_cierre="TP1 Parcial Alcanzado"
+                )
+                if fig: telegram_grafico(fig); plt.close(fig)
+                continue
+
+        # =========================================================
+        # 3. STATUS TP1_HIT: Esperar a que el precio pase TP2 para iniciar Trailing
+        # =========================================================
+        if status == 'TP1_HIT':
+            iniciar_trailing = False
+            if side == 'Buy' and precio_actual >= tp2_price: iniciar_trailing = True
+            elif side == 'Sell' and precio_actual <= tp2_price: iniciar_trailing = True
+
+            if iniciar_trailing:
+                trade['status'] = 'TRAILING'
+                telegram_mensaje(
+                    f"🚀 #TRAILING ACTIVADO PARA #{trade_id}\n"
+                    f"📍 El precio cruzó la marca del TP2 ({tp2_price:.2f})\n"
+                    f"📈 Iniciando persecución a {TRAILING_OFFSET_ATR} ATR de distancia. ¡Dejando correr!"
+                )
+                continue
+
+        # =========================================================
+        # 4. STATUS TRAILING: Perseguir al precio dinámicamente
+        # =========================================================
+        if status == 'TRAILING':
+            if side == 'Buy':
+                nuevo_sl = precio_actual - TRAILING_OFFSET_ATR * atr
+                if nuevo_sl > trade['sl_price']:
                     try:
-                        crear_orden_market(SYMBOL, 'Sell' if side == 'Buy' else 'Buy', qty_cerrar, reduce_only=True)
-                        trade['qty_remaining'] -= qty_cerrar
-                        pnl = (tp1_price - entry) * qty_cerrar if side == 'Buy' else (entry - tp1_price) * qty_cerrar
-                        actualizar_estadisticas(pnl)
-
-                        if trade['order_id_sl']: cancelar_orden(trade['order_id_sl'], SYMBOL)
-                        trade['order_id_sl'] = crear_orden_stop_market(SYMBOL, 'Sell' if side == 'Buy' else 'Buy', trade['qty_remaining'], entry, reduce_only=True).get('orderId')
-                        trade['order_id_tp2'] = crear_orden_limit(SYMBOL, 'Sell' if side == 'Buy' else 'Buy', trade['qty_remaining'], tp2_price, reduce_only=True).get('orderId')
-                        
-                        trade['status'] = 'TP1_HIT'
-                        trade['sl_price'] = entry
-
-                        telegram_mensaje(f"🔓 CIERRE PARCIAL #{trade_id} (TP1 Alcanzado)\n💰 Salida: {tp1_price:.2f}\n📊 PnL Parcial: {pnl:.4f} USD\n🔄 SL movido a BE ({entry:.2f})")
-                        
-                        fig = generar_grafico_trade(
-                            df_actual, side, trade['estado_entrada']['soporte'], trade['estado_entrada']['resistencia'], 
-                            trade['estado_entrada']['slope'], trade['estado_entrada']['intercept'], trade['razones'], 
-                            trade['estado_entrada'], precio_entrada=entry, precio_salida=tp1_price, 
-                            tiempo_entrada=trade['timestamp'], trade_id=trade_id, motivo_cierre="TP1 Alcanzado (Parcial)"
-                        )
-                        if fig:
-                            telegram_grafico(fig)
-                            plt.close(fig)
-                    except Exception as e: logger.error(f"Error TP1: {e}")
-
-        # ==========================================
-        # 3. TP1_HIT: Buscando TP2
-        # ==========================================
-        elif status == 'TP1_HIT':
-            if (side == 'Buy' and precio_actual >= tp2_price) or (side == 'Sell' and precio_actual <= tp2_price):
-                try:
-                    if trade['order_id_sl']: cancelar_orden(trade['order_id_sl'], SYMBOL)
-                    trade['order_id_sl'] = crear_orden_stop_market(SYMBOL, 'Sell' if side == 'Buy' else 'Buy', trade['qty_remaining'], tp2_price, reduce_only=True).get('orderId')
-                    trade['sl_price'] = tp2_price
-                    trade['status'] = 'TP2_HIT'
-                    telegram_mensaje(f"🚀 TP2 ALCANZADO #{trade_id}\n📍 Precio: {tp2_price:.2f}\n📈 TRAILING STOP ACTIVADO. Dejando correr...")
-                except Exception as e: logger.error(f"Error SL post-TP2: {e}")
-
-        # ==========================================
-        # 4. TP2_HIT: Trailing Stop
-        # ==========================================
-        elif status == 'TP2_HIT':
-            atr = trade['estado_entrada']['atr']
-            nuevo_sl = precio_actual - TRAILING_OFFSET_ATR * atr if side == 'Buy' else precio_actual + TRAILING_OFFSET_ATR * atr
-            if (side == 'Buy' and nuevo_sl > trade['sl_price']) or (side == 'Sell' and nuevo_sl < trade['sl_price']):
-                try:
-                    modificar_orden_stop(trade['order_id_sl'], SYMBOL, nuevo_sl)
-                    trade['sl_price'] = nuevo_sl
-                except Exception as e: logger.error(f"Error trailing SL: {e}")
+                        modificar_orden_stop(trade['order_id_sl'], SYMBOL, nuevo_sl)
+                        trade['sl_price'] = nuevo_sl
+                        logger.debug(f"#{trade_id} Trailing SL actualizado a {nuevo_sl:.2f}")
+                    except Exception as e: logger.error(f"Error modificando SL trailing: {e}")
+            else:
+                nuevo_sl = precio_actual + TRAILING_OFFSET_ATR * atr
+                if nuevo_sl < trade['sl_price']:
+                    try:
+                        modificar_orden_stop(trade['order_id_sl'], SYMBOL, nuevo_sl)
+                        trade['sl_price'] = nuevo_sl
+                        logger.debug(f"#{trade_id} Trailing SL actualizado a {nuevo_sl:.2f}")
+                    except Exception as e: logger.error(f"Error modificando SL trailing: {e}")
 
     for idx in sorted(trades_a_remover, reverse=True):
         del ACTIVE_TRADES[idx]
+
 
 # ============================================================
 # LOOP PRINCIPAL
 # ============================================================
 def run_bot():
-    try: set_leverage(SYMBOL, LEVERAGE)
-    except: pass
+    global TRADE_COUNTER, ACTIVE_TRADES
 
-    telegram_mensaje("🤖 BOT V90.7 REAL INICIADO (MEJORA DE GRÁFICOS Y SALIDAS)")
+    try:
+        set_leverage(SYMBOL, LEVERAGE)
+    except Exception as e:
+        logger.error(f"Error al establecer apalancamiento: {e}")
+        telegram_mensaje(f"⚠️ Error apalancamiento: {e}")
+
+    telegram_mensaje("🤖 BOT V90.8 REAL INICIADO (CÓDIGO ORIGINAL INTACTO)\n"
+                     f"📊 Velas: {INTERVAL}m | Máx. posiciones: {MAX_OPEN_TRADES}\n"
+                     f"⚡ Leverage: {LEVERAGE}x | Tamaño: {QTY_BTC} BTC\n"
+                     f"🔒 SL = {SL_MULTIPLIER} ATR | TP1 (50%) | Trailing Infinito a {TRAILING_OFFSET_ATR} ATR")
+
     ultima_fecha = None
 
     while True:
         try:
-            df = calcular_indicadores(obtener_velas())
+            df = obtener_velas()
+            df = calcular_indicadores(df)
+
             if df.empty:
+                logger.warning("⚠️ DataFrame vacío. Saltando ciclo...")
                 time.sleep(SLEEP_SECONDS)
                 continue
 
             estado = extraer_estado_mercado(df, usar_cerrada=True)
-            if not estado:
+            if estado is None:
+                logger.warning("⚠️ Estado nulo. Saltando ciclo...")
                 time.sleep(SLEEP_SECONDS)
                 continue
 
+            # FILTRO FUNDAMENTAL RESTAURADO INTACTO
             titulo, fuente, sent_label, sent_score = obtener_noticias_y_sentimiento()
+
             decision, soporte, resistencia, razones = motor_v90(estado, df)
 
-            logger.info(f"🕒 {estado['fecha']} | 💰 {estado['precio']:.2f} | 🎯 Decisión: {decision if decision else 'NO TRADE'} | Posiciones: {len(ACTIVE_TRADES)}/{MAX_OPEN_TRADES}")
+            filtro_ok = True
+            motivo_filtro = "Sin filtro"
+            if decision:
+                filtro_ok, motivo_filtro = filtrar_por_fundamental(decision, sent_label, estado)
+                if not filtro_ok:
+                    decision = None
 
-            if decision and len(ACTIVE_TRADES) < MAX_OPEN_TRADES:
-                abrir_posicion_real(decision, estado['precio'], estado['atr'], soporte, resistencia, razones, estado['fecha'], estado, df)
+            # LOGGING RESTAURADO INTACTO
+            num_abiertas = len(ACTIVE_TRADES)
+            logger.info("="*100)
+            logger.info(f"🕒 {estado['fecha']} | 💰 BTC: {estado['precio']:.2f}")
+            logger.info(f"📐 Tendencia: {estado['tendencia']} | Slope: {estado['slope']:.5f}")
+            logger.info(f"🧱 Soporte: {soporte:.2f} | Resistencia: {resistencia:.2f}")
+            logger.info(f"📊 ATR: {estado['atr']:.2f} | EMA20: {estado['ema20']:.2f}")
+            logger.info(f"📏 Patrón: {estado['patron']}")
+            logger.info(f"🎯 Decisión: {decision if decision else 'NO TRADE'}")
+            logger.info(f"🧠 Razones: {', '.join(razones)}")
+            logger.info(f"🔒 Filtro fundamental: {'PERMITIDO' if filtro_ok else 'BLOQUEADO'} - {motivo_filtro}")
+            logger.info(f"📊 Posiciones abiertas: {num_abiertas}/{MAX_OPEN_TRADES}")
+            logger.info(f"📰 Noticia: {titulo} (Fuente: {fuente}) | Sentimiento: {sent_label} ({sent_score:.3f})")
+            logger.info("="*100)
+
+            if decision and num_abiertas < MAX_OPEN_TRADES:
+                abrir_posicion_real(
+                    decision=decision,
+                    precio=estado['precio'],
+                    atr=estado['atr'],
+                    soporte=soporte,
+                    resistencia=resistencia,
+                    razones=razones,
+                    tiempo=estado['fecha'],
+                    estado=estado,
+                    df=df
+                )
 
             revisar_posiciones_reales(estado['precio'], df, titulo, fuente, sent_label, sent_score)
 
             fecha_hoy = datetime.now(timezone.utc).date()
-            if ultima_fecha is None or fecha_hoy != ultima_fecha:
+            if ultima_fecha is None:
+                ultima_fecha = fecha_hoy
+            elif fecha_hoy != ultima_fecha:
                 ultima_fecha = fecha_hoy
                 logger.info("Nuevo día.")
 
             time.sleep(SLEEP_SECONDS)
+
         except Exception as e:
-            logger.error(f"🚨 ERROR: {e}")
+            logger.error(f"🚨 ERROR en loop principal: {e}", exc_info=True)
+            telegram_mensaje(f"🚨 ERROR BOT: {e}")
             time.sleep(60)
 
+# ============================================================
+# START
+# ============================================================
 if __name__ == '__main__':
     run_bot()
