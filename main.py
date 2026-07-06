@@ -202,8 +202,12 @@ def crear_orden_limit(symbol, side, qty, price, reduce_only=False, post_only=Fal
     result = bybit_request(endpoint, method='POST', payload=payload)
     return result
 
+# ================= CORRECCIÓN 1: crear_orden_stop_market =================
 def crear_orden_stop_market(symbol, side, qty, stop_price, reduce_only=True):
     endpoint = "/v5/order/create"
+    # Dirección: 1 (Sube) para comprar/cerrar short, 2 (Cae) para vender/cerrar long
+    trigger_dir = 2 if side.capitalize() == "Sell" else 1
+    
     payload = {
         "category": "linear",
         "symbol": symbol,
@@ -211,8 +215,8 @@ def crear_orden_stop_market(symbol, side, qty, stop_price, reduce_only=True):
         "orderType": "Market",
         "qty": str(qty),
         "timeInForce": "GTC",
-        "stopOrderType": "StopLoss",
-        "stopPrice": str(stop_price),
+        "triggerPrice": str(stop_price),
+        "triggerDirection": trigger_dir,
         "reduceOnly": reduce_only
     }
     result = bybit_request(endpoint, method='POST', payload=payload)
@@ -228,13 +232,14 @@ def cancelar_orden(order_id, symbol):
     result = bybit_request(endpoint, method='POST', payload=payload)
     return result
 
+# ================= CORRECCIÓN 2: modificar_orden_stop =================
 def modificar_orden_stop(order_id, symbol, stop_price):
     endpoint = "/v5/order/amend"
     payload = {
         "category": "linear",
         "symbol": symbol,
         "orderId": order_id,
-        "stopPrice": str(stop_price)
+        "triggerPrice": str(stop_price)
     }
     result = bybit_request(endpoint, method='POST', payload=payload)
     return result
