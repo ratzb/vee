@@ -4,7 +4,7 @@
 # - Velas de 5 minutos, máximo 3 operaciones abiertas
 # - Apalancamiento x10, cierre parcial 50% en TP1, SL a BE
 # - TP2 dinámico + TRAILING STOP (0.75 ATR) post-TP2
-# - Tamaño fijo: 0.001 BTC (≈60 USD a 60k)
+# - Tamaño fijo: 0.002 BTC (≈120 USD a 60k) para cumplir mínimo en órdenes limit
 # - Identificador único (#ID) para cada operación
 # ============================================================
 
@@ -43,8 +43,8 @@ LEVERAGE = 10                  # Apalancamiento 10x
 MAX_OPEN_TRADES = 3
 SLEEP_SECONDS = 300
 
-# Tamaño de posición FIJO (mínimo permitido en futuros BTCUSDT)
-QTY_BTC = 0.001                # 0.001 BTC ≈ 60 USD a precio 60k
+# Tamaño de posición FIJO (AUMENTADO A 0.002 BTC para cumplir mínimo en órdenes limit)
+QTY_BTC = 0.002                # 0.002 BTC ≈ 120 USD a precio 60k (margen ~12 USD)
 
 # Trailing Stop después de TP2
 TRAILING_OFFSET_ATR = 0.75     # múltiplos de ATR
@@ -140,8 +140,6 @@ def bybit_request(endpoint, method='GET', params=None, payload=None):
         param_str = query_string
     else:  # POST
         full_url = f"{BASE_URL}{endpoint}"
-        # 🔥 GENERAMOS EL CUERPO JSON CON CLAVES ORDENADAS Y ESPACIOS (DEFAULT)
-        # Esto asegura que el cuerpo y la firma coincidan exactamente.
         body = json.dumps(payload, sort_keys=True)
         param_str = body
 
@@ -163,7 +161,6 @@ def bybit_request(endpoint, method='GET', params=None, payload=None):
     if method == 'GET':
         response = requests.get(full_url, headers=headers, timeout=15)
     else:
-        # Enviamos el mismo 'body' que usamos para la firma
         response = requests.post(full_url, headers=headers, data=body, timeout=15)
 
     if response.status_code != 200:
@@ -1104,7 +1101,7 @@ def run_bot():
         logger.error(f"Error al establecer apalancamiento: {e}")
         telegram_mensaje(f"⚠️ Error apalancamiento: {e}")
 
-    telegram_mensaje("🤖 BOT V90.6 REAL INICIADO\n"
+    telegram_mensaje("🤖 BOT V90.6 REAL INICIADO (TAMAÑO 0.002 BTC)\n"
                      f"📊 Velas: {INTERVAL}m | Máx. posiciones: {MAX_OPEN_TRADES}\n"
                      f"⚡ Leverage: {LEVERAGE}x | Tamaño: {QTY_BTC} BTC\n"
                      f"🔒 TP1 50% | Trailing Stop post-TP2 ({TRAILING_OFFSET_ATR} ATR)")
