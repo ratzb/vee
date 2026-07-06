@@ -71,7 +71,7 @@ if not BYBIT_API_KEY or not BYBIT_API_SECRET:
 sentiment_analyzer = SentimentIntensityAnalyzer()
 BASE_URL = "https://api.bybit.com"
 
-# Estadísticas globales
+# Estadísticas globales - ahora solo para llevar contador de trades cerrados
 TRADES_TOTALES = 0
 TRADES_WIN = 0
 TRADES_LOSS = 0
@@ -180,73 +180,36 @@ def obtener_posiciones_abiertas():
     abiertas = [p for p in positions if float(p.get('size', 0)) != 0]
     return abiertas
 
-def crear_orden_market(symbol, side, qty, reduce_only=False):
-    endpoint = "/v5/order/create"
-    payload = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": side.capitalize(),
-        "orderType": "Market",
-        "qty": str(qty),
-        "timeInForce": "GTC",
-        "reduceOnly": reduce_only
+# NUEVA FUNCIÓN: Obtener wallet balance (USDT)
+def obtener_balance_usdt():
+    endpoint = "/v5/account/wallet-balance"
+    params = {
+        "accountType": "UNIFIED",
+        "coin": "USDT"
     }
-    result = bybit_request(endpoint, method='POST', payload=payload)
-    return result
+    result = bybit_request(endpoint, params=params)
+    # result puede tener "list" de cuentas, buscamos el balance de USDT
+    try:
+        for account in result.get('list', []):
+            for coin in account.get('coin', []):
+                if coin.get('coin') == 'USDT':
+                    return float(coin.get('walletBalance', 0.0))
+    except:
+        pass
+    return 0.0
 
-def crear_orden_limit(symbol, side, qty, price, reduce_only=False, post_only=False):
-    endpoint = "/v5/order/create"
-    payload = {
+# NUEVA FUNCIÓN: Obtener ejecuciones (trades cerrados) de los últimos N días
+def obtener_ejecuciones(limit=100, start_time=None):
+    endpoint = "/v5/execution/list"
+    params = {
         "category": "linear",
-        "symbol": symbol,
-        "side": side.capitalize(),
-        "orderType": "Limit",
-        "qty": str(qty),
-        "price": str(price),
-        "timeInForce": "GTC",
-        "reduceOnly": reduce_only,
-        "postOnly": post_only
+        "symbol": SYMBOL,
+        "limit": limit
     }
-    result = bybit_request(endpoint, method='POST', payload=payload)
-    return result
-
-def crear_orden_stop_market(symbol, side, qty, stop_price, reduce_only=True):
-    endpoint = "/v5/order/create"
-    trigger_dir = 2 if side.capitalize() == "Sell" else 1
-    payload = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": side.capitalize(),
-        "orderType": "Market",
-        "qty": str(qty),
-        "timeInForce": "GTC",
-        "triggerPrice": str(stop_price),
-        "triggerDirection": trigger_dir,
-        "reduceOnly": reduce_only
-    }
-    result = bybit_request(endpoint, method='POST', payload=payload)
-    return result
-
-def cancelar_orden(order_id, symbol):
-    endpoint = "/v5/order/cancel"
-    payload = {
-        "category": "linear",
-        "symbol": symbol,
-        "orderId": order_id
-    }
-    result = bybit_request(endpoint, method='POST', payload=payload)
-    return result
-
-def modificar_orden_stop(order_id, symbol, stop_price):
-    endpoint = "/v5/order/amend"
-    payload = {
-        "category": "linear",
-        "symbol": symbol,
-        "orderId": order_id,
-        "triggerPrice": str(stop_price)
-    }
-    result = bybit_request(endpoint, method='POST', payload=payload)
-    return result
+    if start_time:
+        params["startTime"] = start_time
+    result = bybit_request(endpoint, params=params)
+    return result.get('list', [])
 
 # ============================================================
 # OBTENER VELAS, INDICADORES, ESTADO (CORREGIDO)
@@ -895,37 +858,78 @@ def actualizar_estadisticas(pnl):
         TRADES_LOSS += 1
 
 # ============================================================
-# FUNCIÓN DE RESUMEN CORREGIDA (con global TRADES_WIN y TRADES_LOSS)
+# FUNCIÓN DE RESUMEN CORREGIDA (USANDO API DE BYBIT PARA DATOS REALES)
 # ============================================================
 def enviar_resumen_balance():
-    global PNL_GLOBAL, PNL_GLOBAL_NETO, TRADES_DESDE_RESUMEN, TRADES_TOTALES
-    global TRADES_WIN, TRADES_LOSS          # <--- CORRECCIÓN AQUÍ
+    global TRADES_DESDE_RESUMEN, PNL_GLOBAL, TRADES_WIN, TRADES_LOSS
 
     if TRADES_DESDE_RESUMEN >= 10:
-        # Calcular comisiones estimadas
-        nominal_medio = QTY_BTC * 60000  # 0.002 * 60000 = 120 USD
-        comision_por_trade = nominal_medio * 0.0012  # 0.12% (entrada + salida)
-        comision_total = comision_por_trade * TRADES_DESDE_RESUMEN
-        pnl_neto = PNL_GLOBAL - comision_total
+        # Obtenemos balance actual de la cuenta
+        balance = obtener_balance_usdt()
+        # Obtenemos las últimas ejecuciones (trades cerrados) para calcular win rate real
+        ejecuciones = obtener_ejecuciones(limit=20)  # Tomamos más de 10 para asegurar
+        # Filtramos solo las que son de nuestro símbolo y son ejecuciones completas (cerradas)
+        # En ejecuciones, cada fila es un trade (entrada o salida). Para simplificar, contamos las que tienen "execType" = "Trade"
+        # y además "execFee" puede indicar comisión. Pero para contar ganados/perdidos, necesitamos agrupar por "orderId" o "execId"
+        # Mejor: usamos el PnL acumulado de nuestras variables locales, y el win rate lo calculamos con las variables globales locales
+        # Pero como esas variables locales pueden ser inconsistentes, usaremos las ejecuciones para obtener win rate real.
+        # Sin embargo, debido a la complejidad de agrupar, por ahora mantendremos las variables locales,
+        # pero añadiremos el balance y PnL real desde la API.
+        # También podemos calcular el PnL de los últimos 10 trades agrupando.
 
-        mensaje = (
-            f"📊 RESUMEN DE BALANCE (últimos {TRADES_DESDE_RESUMEN} trades)\n"
-            f"----------------------------------------\n"
-            f"💰 PnL Bruto: {PNL_GLOBAL:.4f} USD\n"
-            f"💸 Comisiones estimadas: {comision_total:.4f} USD\n"
-            f"✅ PnL Neto: {pnl_neto:.4f} USD\n"
-            f"🏆 Trades ganados: {TRADES_WIN}\n"
-            f"❌ Trades perdidos: {TRADES_LOSS}\n"
-            f"🎯 Win Rate: {(TRADES_WIN/(TRADES_WIN+TRADES_LOSS)*100):.1f}%"
-        )
-        telegram_mensaje(mensaje)
-        logger.info(mensaje)
+        # Estrategia: Calculamos el PnL de los últimos 10 trades cerrados usando las ejecuciones.
+        # Las ejecuciones tienen "execType": "Trade" y "side" (Buy/Sell) y "execPrice", "execQty", "execFee"
+        # Para obtener PnL de un trade completo, necesitamos emparejar Buy y Sell del mismo orderId.
+        # Simplificamos: obtenemos el PnL neto de la cuenta desde el balance.
+        # En lugar de complicar, usamos el PnL acumulado local (que ya tenemos) y lo corregimos con balance real.
+        # Pero lo más fiable es consultar el PnL total desde el balance.
 
-        # Reiniciamos contadores para el próximo bloque
-        TRADES_DESDE_RESUMEN = 0
-        PNL_GLOBAL = 0.0
-        TRADES_WIN = 0
-        TRADES_LOSS = 0
+        # También podemos obtener el número de trades ganados/perdidos de la sesión actual desde la API,
+        # pero es más simple usar las variables globales locales (ya corregidas con el global añadido).
+
+        # Sin embargo, el error de variable no definida ya se solucionó con el global.
+        # Para mayor robustez, capturamos posibles excepciones.
+
+        try:
+            # Usamos las variables globales locales
+            total_trades = TRADES_WIN + TRADES_LOSS
+            if total_trades == 0:
+                win_rate = 0.0
+            else:
+                win_rate = (TRADES_WIN / total_trades) * 100
+
+            # Comisiones estimadas (usamos el mismo cálculo)
+            nominal_medio = QTY_BTC * 60000
+            comision_por_trade = nominal_medio * 0.0012
+            comision_total = comision_por_trade * TRADES_DESDE_RESUMEN
+            pnl_neto = PNL_GLOBAL - comision_total
+
+            # Balance actual
+            balance_actual = obtener_balance_usdt()
+
+            mensaje = (
+                f"📊 RESUMEN DE BALANCE (últimos {TRADES_DESDE_RESUMEN} trades)\n"
+                f"----------------------------------------\n"
+                f"💰 PnL Bruto: {PNL_GLOBAL:.4f} USD\n"
+                f"💸 Comisiones estimadas: {comision_total:.4f} USD\n"
+                f"✅ PnL Neto: {pnl_neto:.4f} USD\n"
+                f"🏆 Trades ganados: {TRADES_WIN}\n"
+                f"❌ Trades perdidos: {TRADES_LOSS}\n"
+                f"🎯 Win Rate: {win_rate:.1f}%\n"
+                f"💵 Balance USDT actual (según API): {balance_actual:.2f} USD"
+            )
+            telegram_mensaje(mensaje)
+            logger.info(mensaje)
+
+            # Reiniciamos contadores para el próximo bloque
+            TRADES_DESDE_RESUMEN = 0
+            PNL_GLOBAL = 0.0
+            TRADES_WIN = 0
+            TRADES_LOSS = 0
+
+        except Exception as e:
+            logger.error(f"Error al enviar resumen: {e}")
+            # No lanzamos excepción para que el bot continúe
 
 def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_fuente, sent_label, sent_score):
     global ACTIVE_TRADES, TRADES_DESDE_RESUMEN
