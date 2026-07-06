@@ -1,14 +1,6 @@
 # ============================================================
-# BOT TRADING V90.6 – VERSIÓN REAL (CON TP1, TP2 Y TRAILING)
+# BOT TRADING V90.6 – VERSIÓN REAL (CON CORRECCIÓN DE SL/TP)
 # ============================================================
-# - Velas de 5 minutos, máximo 3 operaciones abiertas
-# - Apalancamiento x10, cierre parcial 50% en TP1, SL a BE
-# - TP2 dinámico + TRAILING STOP (0.75 ATR) post-TP2
-# - Tamaño fijo: 0.002 BTC (para cumplir mínimo en órdenes limit)
-# - SL = 2.0 ATR (más amplio para evitar cierres prematuros)
-# - Se recalcula SL/TP después de la entrada para evitar ejecución inmediata
-# ============================================================
-
 import os
 import time
 import io
@@ -39,26 +31,19 @@ logger = logging.getLogger(__name__)
 # CONFIGURACIÓN GENERAL
 # ============================================================
 SYMBOL = "BTCUSDT"
-INTERVAL = "5"                 # 5 minutos
-LEVERAGE = 10                  # Apalancamiento 10x
+INTERVAL = "5"
+LEVERAGE = 10
 MAX_OPEN_TRADES = 3
 SLEEP_SECONDS = 300
 
-# Tamaño de posición (0.002 BTC para que la mitad (0.001) cumpla mínimo)
 QTY_BTC = 0.002
+TRAILING_OFFSET_ATR = 0.75
+SL_MULTIPLIER = 3.0  # AUMENTADO A 3.0 PARA EVITAR CIERRES PREMATUROS
 
-# Trailing Stop después de TP2
-TRAILING_OFFSET_ATR = 0.75     # múltiplos de ATR
-
-# SL más amplio (2.0 ATR en lugar de 1.5)
-SL_MULTIPLIER = 2.0
-
-# Gráficos
 GRAFICO_VELAS_LIMIT = 120
 MOSTRAR_EMA20 = True
 MOSTRAR_ATR = False
 
-# Caché de noticias
 NEWS_CACHE = {
     "titulo": "No disponible",
     "fuente": "Ninguna",
@@ -69,7 +54,7 @@ NEWS_CACHE = {
 NEWS_CACHE_TTL = 3600
 
 # ============================================================
-# CREDENCIALES (VARIABLES DE ENTORNO)
+# CREDENCIALES
 # ============================================================
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -80,15 +65,9 @@ NEWS_API_KEY = os.getenv("NEWS_API_KEY")
 if not BYBIT_API_KEY or not BYBIT_API_SECRET:
     raise Exception("❌ BYBIT_API_KEY o BYBIT_API_SECRET no configuradas")
 
-# ============================================================
-# INICIALIZAR VADER Y BASE URL
-# ============================================================
 sentiment_analyzer = SentimentIntensityAnalyzer()
 BASE_URL = "https://api.bybit.com"
 
-# ============================================================
-# ESTADÍSTICAS GLOBALES
-# ============================================================
 TRADES_TOTALES = 0
 TRADES_WIN = 0
 TRADES_LOSS = 0
@@ -96,7 +75,6 @@ PNL_GLOBAL = 0.0
 MAX_DRAWDOWN = 0.0
 BALANCE_MAX = 0.0
 TRADE_COUNTER = 0
-
 ACTIVE_TRADES = []
 
 # ============================================================
@@ -125,7 +103,7 @@ def telegram_grafico(fig):
         logger.error(f"Telegram photo error: {e}")
 
 # ============================================================
-# FUNCIONES API BYBIT (FIRMA CORREGIDA)
+# FUNCIONES API BYBIT
 # ============================================================
 def bybit_request(endpoint, method='GET', params=None, payload=None):
     timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000))
@@ -262,7 +240,7 @@ def modificar_orden_stop(order_id, symbol, stop_price):
     return result
 
 # ============================================================
-# OBTENER VELAS, INDICADORES, ESTADO (SIN CAMBIOS)
+# OBTENER VELAS, INDICADORES, ESTADO
 # ============================================================
 def obtener_velas(limit=300):
     url = f"{BASE_URL}/v5/market/kline"
@@ -435,7 +413,7 @@ def extraer_estado_mercado_por_indice(df, idx):
     return extraer_estado_mercado(df_temp, usar_cerrada=False)
 
 # ============================================================
-# PATRONES Y MOTOR DE DECISIÓN (IDÉNTICO AL ORIGINAL)
+# PATRONES Y MOTOR DE DECISIÓN
 # ============================================================
 def detectar_patron_multivela(df, n=3):
     if len(df) < n:
@@ -689,7 +667,7 @@ def filtrar_por_fundamental(decision, sent_label, estado):
     return True, f"Sentimiento permitido ({sent_label})"
 
 # ============================================================
-# GRÁFICO DE VELAS
+# GRÁFICO
 # ============================================================
 def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept, razones, estado, precio_salida=None, trade_id=None):
     if df.empty or estado is None:
@@ -769,7 +747,7 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         return None
 
 # ============================================================
-# GESTIÓN DE POSICIONES REALES (CON RECÁLCULO DE SL/TP POST-ENTRADA)
+# GESTIÓN DE POSICIONES REALES (CON RECÁLCULO Y VALIDACIÓN)
 # ============================================================
 
 def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, tiempo, estado, df):
@@ -779,9 +757,9 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
         return None
 
     qty = QTY_BTC
-
-    # 1. Entrada Market (sin SL/TP todavía)
     side = "Buy" if decision == "Buy" else "Sell"
+
+    # 1. Entrada Market (sin SL/TP)
     logger.info(f"Enviando orden {side} Market por {qty} BTC...")
     try:
         crear_orden_market(SYMBOL, side, qty, reduce_only=False)
@@ -800,7 +778,7 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
         logger.error(f"Error abriendo posición: {e}")
         return None
 
-    # 2. Recalcular SL, TP1, TP2 basados en el precio de entrada real
+    # 2. Calcular SL, TP1, TP2 basados en entry_price y atr
     if decision == "Buy":
         sl_price = round(entry_price - SL_MULTIPLIER * atr, 2)
         tp1_price = round(min(resistencia, entry_price + 2.0 * atr), 2)
@@ -810,14 +788,32 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
         tp1_price = round(max(soporte, entry_price - 2.0 * atr), 2)
         tp2_price = round(entry_price - 3.5 * atr, 2)
 
-    logger.info(f"SL: {sl_price:.2f}, TP1: {tp1_price:.2f}, TP2: {tp2_price:.2f}")
+    logger.info(f"SL calculado: {sl_price}, TP1: {tp1_price}, TP2: {tp2_price}")
+
+    # Validar que SL esté en el lado correcto y a distancia > 0
+    if decision == "Buy" and sl_price >= entry_price:
+        logger.error(f"SL inválido: {sl_price} >= {entry_price}. Cancelando posición.")
+        crear_orden_market(SYMBOL, 'Sell' if side=='Buy' else 'Buy', qty, reduce_only=True)
+        return None
+    if decision == "Sell" and sl_price <= entry_price:
+        logger.error(f"SL inválido: {sl_price} <= {entry_price}. Cancelando posición.")
+        crear_orden_market(SYMBOL, 'Sell' if side=='Buy' else 'Buy', qty, reduce_only=True)
+        return None
+
+    # Validar TP1
+    if decision == "Buy" and tp1_price <= entry_price:
+        logger.warning(f"TP1 inválido: {tp1_price} <= {entry_price}. Ajustando a entry_price + 2*atr")
+        tp1_price = round(entry_price + 2.0 * atr, 2)
+    if decision == "Sell" and tp1_price >= entry_price:
+        logger.warning(f"TP1 inválido: {tp1_price} >= {entry_price}. Ajustando a entry_price - 2*atr")
+        tp1_price = round(entry_price - 2.0 * atr, 2)
 
     # 3. Crear órdenes TP1 (50%) y SL (total)
     qty_half = qty / 2
     try:
         tp1_order = crear_orden_limit(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty_half, tp1_price, reduce_only=True)
         tp1_order_id = tp1_order.get('orderId')
-        logger.info(f"TP1 orden creada: {tp1_order_id}")
+        logger.info(f"TP1 orden creada: {tp1_order_id} a {tp1_price}")
     except Exception as e:
         logger.error(f"Error creando TP1: {e}")
         tp1_order_id = None
@@ -825,7 +821,7 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
     try:
         sl_order = crear_orden_stop_market(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty, sl_price, reduce_only=True)
         sl_order_id = sl_order.get('orderId')
-        logger.info(f"SL orden creada: {sl_order_id}")
+        logger.info(f"SL orden creada: {sl_order_id} a {sl_price}")
     except Exception as e:
         logger.error(f"Error creando SL: {e}")
         sl_order_id = None
@@ -941,7 +937,6 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
         # -------- SL --------
         if (side == 'Buy' and precio_actual <= sl_price) or (side == 'Sell' and precio_actual >= sl_price):
             telegram_mensaje(f"⚠️ SL alcanzado para #{trade_id} (precio {precio_actual:.2f})")
-            # No removemos la posición aquí porque la API la cerrará y la detectaremos en el próximo ciclo.
             continue
 
         # -------- ACTIVE: TP1 --------
@@ -1098,7 +1093,7 @@ def run_bot():
         logger.error(f"Error al establecer apalancamiento: {e}")
         telegram_mensaje(f"⚠️ Error apalancamiento: {e}")
 
-    telegram_mensaje("🤖 BOT V90.6 REAL INICIADO (CON TRAILING Y RECÁLCULO)\n"
+    telegram_mensaje("🤖 BOT V90.6 REAL INICIADO (CON RECÁLCULO Y SL=3 ATR)\n"
                      f"📊 Velas: {INTERVAL}m | Máx. posiciones: {MAX_OPEN_TRADES}\n"
                      f"⚡ Leverage: {LEVERAGE}x | Tamaño: {QTY_BTC} BTC\n"
                      f"🔒 SL = {SL_MULTIPLIER} ATR | TP1 50% | Trailing post-TP2 ({TRAILING_OFFSET_ATR} ATR)")
