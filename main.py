@@ -1,10 +1,11 @@
 # ============================================================
-# BOT TRADING V90.6 – VERSIÓN REAL CON TP1/TP2 Y TRAILING
+# BOT TRADING V90.6 – VERSIÓN REAL (CON TP1, TP2 Y TRAILING)
 # ============================================================
 # - Velas de 5 minutos, máximo 3 operaciones abiertas
 # - Apalancamiento x10, cierre parcial 50% en TP1, SL a BE
 # - TP2 dinámico + TRAILING STOP (0.75 ATR) post-TP2
-# - Tamaño fijo: 0.002 BTC (para que TP1 y TP2 tengan 0.001 BTC)
+# - Tamaño fijo: 0.002 BTC (para cumplir mínimo en órdenes limit)
+# - SL = 2.0 ATR (más amplio para evitar cierres prematuros)
 # - Identificador único (#ID) para cada operación
 # ============================================================
 
@@ -43,11 +44,14 @@ LEVERAGE = 10                  # Apalancamiento 10x
 MAX_OPEN_TRADES = 3
 SLEEP_SECONDS = 300
 
-# Tamaño de posición TOTAL (0.002 BTC para que la mitad sea 0.001 BTC)
-QTY_BTC = 0.002                # 0.002 BTC ≈ 120 USD a precio 60k (margen ~12 USD)
+# Tamaño de posición (0.002 BTC para que la mitad (0.001) cumpla mínimo)
+QTY_BTC = 0.002
 
 # Trailing Stop después de TP2
 TRAILING_OFFSET_ATR = 0.75     # múltiplos de ATR
+
+# SL más amplio (2.0 ATR en lugar de 1.5)
+SL_MULTIPLIER = 2.0
 
 # Gráficos
 GRAFICO_VELAS_LIMIT = 120
@@ -83,19 +87,20 @@ sentiment_analyzer = SentimentIntensityAnalyzer()
 BASE_URL = "https://api.bybit.com"
 
 # ============================================================
-# ESTADÍSTICAS GLOBALES (REALES)
+# ESTADÍSTICAS GLOBALES
 # ============================================================
 TRADES_TOTALES = 0
 TRADES_WIN = 0
 TRADES_LOSS = 0
 PNL_GLOBAL = 0.0
+MAX_DRAWDOWN = 0.0
+BALANCE_MAX = 0.0
 TRADE_COUNTER = 0
 
-# Posiciones activas gestionadas localmente
 ACTIVE_TRADES = []
 
 # ============================================================
-# TELEGRAM (SIN CAMBIOS)
+# TELEGRAM
 # ============================================================
 def telegram_mensaje(texto):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -120,7 +125,7 @@ def telegram_grafico(fig):
         logger.error(f"Telegram photo error: {e}")
 
 # ============================================================
-# FUNCIONES DE API DE BYBIT (CON FIRMA CORREGIDA)
+# FUNCIONES API BYBIT (FIRMA CORREGIDA)
 # ============================================================
 def bybit_request(endpoint, method='GET', params=None, payload=None):
     timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000))
@@ -430,7 +435,7 @@ def extraer_estado_mercado_por_indice(df, idx):
     return extraer_estado_mercado(df_temp, usar_cerrada=False)
 
 # ============================================================
-# PATRONES Y MOTOR DE DECISIÓN (IDÉNTICO A TU ORIGINAL)
+# PATRONES Y MOTOR DE DECISIÓN (IDÉNTICO AL ORIGINAL)
 # ============================================================
 def detectar_patron_multivela(df, n=3):
     if len(df) < n:
@@ -568,7 +573,7 @@ def motor_v90(estado_actual, df):
     return None, soporte, resistencia, razones
 
 # ============================================================
-# FILTRO FUNDAMENTAL (SIN CAMBIOS)
+# FILTRO FUNDAMENTAL
 # ============================================================
 def actualizar_cache_noticias():
     global NEWS_CACHE
@@ -684,7 +689,7 @@ def filtrar_por_fundamental(decision, sent_label, estado):
     return True, f"Sentimiento permitido ({sent_label})"
 
 # ============================================================
-# GRÁFICO DE VELAS (SIN CAMBIOS)
+# GRÁFICO DE VELAS
 # ============================================================
 def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept, razones, estado, precio_salida=None, trade_id=None):
     if df.empty or estado is None:
@@ -764,7 +769,7 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         return None
 
 # ============================================================
-# GESTIÓN DE POSICIONES REALES CON TP1, TP2 Y TRAILING (LÓGICA ORIGINAL)
+# GESTIÓN DE POSICIONES REALES (CON TP1, TP2 Y TRAILING)
 # ============================================================
 
 def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, tiempo, estado, df):
@@ -773,19 +778,20 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
     if len(ACTIVE_TRADES) >= MAX_OPEN_TRADES:
         return None
 
-    qty = QTY_BTC  # 0.002 BTC
+    qty = QTY_BTC
 
     if decision == "Buy":
-        sl_price = round(precio - 1.5 * atr, 2)
+        sl_price = round(precio - SL_MULTIPLIER * atr, 2)
         tp1_price = round(min(resistencia, precio + 2.0 * atr), 2)
         tp2_price = round(precio + 3.5 * atr, 2)
         side = "Buy"
     else:
-        sl_price = round(precio + 1.5 * atr, 2)
+        sl_price = round(precio + SL_MULTIPLIER * atr, 2)
         tp1_price = round(max(soporte, precio - 2.0 * atr), 2)
         tp2_price = round(precio - 3.5 * atr, 2)
         side = "Sell"
 
+    # 1. Entrada Market
     logger.info(f"Enviando orden {side} Market por {qty} BTC...")
     try:
         crear_orden_market(SYMBOL, side, qty, reduce_only=False)
@@ -803,7 +809,7 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
         logger.error(f"Error abriendo posición: {e}")
         return None
 
-    # Órdenes TP1 (50% = 0.001 BTC) y SL (total = 0.002 BTC)
+    # 2. Órdenes TP1 (50%) y SL (total)
     qty_half = qty / 2
     try:
         tp1_order = crear_orden_limit(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty_half, tp1_price, reduce_only=True)
@@ -830,7 +836,7 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
         'sl_price': sl_price,
         'tp1_price': tp1_price,
         'tp2_price': tp2_price,
-        'status': 'ACTIVE',   # ACTIVE → TP1_HIT → TP2_HIT
+        'status': 'ACTIVE',
         'order_id_sl': sl_order_id,
         'order_id_tp1': tp1_order_id,
         'order_id_tp2': None,
@@ -845,7 +851,7 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
         f"📌 ENTRADA REAL #{trade_id} {decision}\n"
         f"💰 Precio: {entry_price:.2f}\n"
         f"📍 SL: {sl_price:.2f} | TP1: {tp1_price:.2f} | TP2: {tp2_price:.2f}\n"
-        f"📦 Cantidad total: {qty:.6f} BTC (nominal ≈ {qty*entry_price:.2f} USD)\n"
+        f"📦 Cantidad: {qty:.6f} BTC (nominal ≈ {qty*entry_price:.2f} USD)\n"
         f"💵 Margen aprox: {qty*entry_price/LEVERAGE:.2f} USD\n"
         f"📈 PnL flotante: {pnl_flotante:.4f} USD\n"
         f"🧠 Razones técnicas:\n• " + "\n• ".join(razones)
@@ -895,6 +901,7 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
         trade_id = trade['trade_id']
         side = trade['side']
         entry = trade['entry_price']
+        qty_total = trade['qty_total']
         qty_remaining = trade['qty_remaining']
         sl_price = trade['sl_price']
         tp1_price = trade['tp1_price']
@@ -907,32 +914,31 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
 
         pos_api = pos_map.get(side.lower())
         if not pos_api:
-            # Posición cerrada completamente
             if qty_remaining > 0:
-                pnl = (precio_actual - entry) * qty_remaining if side == 'Buy' else (entry - precio_actual) * qty_remaining
+                if side == 'Buy':
+                    pnl = (precio_actual - entry) * qty_remaining
+                else:
+                    pnl = (entry - precio_actual) * qty_remaining
                 actualizar_estadisticas(pnl)
-                mensaje = f"🔒 POSICIÓN #{trade_id} CERRADA - PnL: {pnl:.4f} USD"
+                mensaje = f"🔒 POSICIÓN #{trade_id} CERRADA (sin rastro en API) - PnL: {pnl:.4f} USD"
                 telegram_mensaje(mensaje)
             trades_a_remover.append(idx)
             continue
 
         size_actual = float(pos_api.get('size', 0))
         if size_actual == 0:
-            # Posición con tamaño 0 (cerrada)
             if qty_remaining > 0:
-                # No podemos calcular PnL exacto sin historial
-                pass
+                pnl = 0.0
+                actualizar_estadisticas(pnl)
             trades_a_remover.append(idx)
             continue
 
-        # Verificar SL
+        # -------- SL --------
         if (side == 'Buy' and precio_actual <= sl_price) or (side == 'Sell' and precio_actual >= sl_price):
-            # SL activado: la orden stop market se ejecutará automáticamente.
-            # No hacemos nada aquí, la detectaremos en la próxima iteración.
             telegram_mensaje(f"⚠️ SL alcanzado para #{trade_id} (precio {precio_actual:.2f})")
             continue
 
-        # Estado ACTIVE: verificar TP1
+        # -------- ACTIVE: TP1 --------
         if status == 'ACTIVE':
             tp1_alcanzado = False
             if side == 'Buy' and precio_actual >= tp1_price:
@@ -941,76 +947,77 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                 tp1_alcanzado = True
 
             if tp1_alcanzado:
-                qty_cerrar = trade['qty_total'] / 2
+                qty_cerrar = qty_total / 2
                 if qty_cerrar > qty_remaining:
                     qty_cerrar = qty_remaining
-                if qty_cerrar > 0:
+                if qty_cerrar <= 0:
+                    continue
+
+                try:
+                    close_side = 'Sell' if side == 'Buy' else 'Buy'
+                    crear_orden_market(SYMBOL, close_side, qty_cerrar, reduce_only=True)
+                    trade['qty_remaining'] -= qty_cerrar
+                    pnl = (tp1_price - entry) * qty_cerrar if side == 'Buy' else (entry - tp1_price) * qty_cerrar
+                    actualizar_estadisticas(pnl)
+
+                    nuevo_sl = entry
+                    if order_id_sl:
+                        try:
+                            cancelar_orden(order_id_sl, SYMBOL)
+                        except:
+                            pass
                     try:
-                        close_side = 'Sell' if side == 'Buy' else 'Buy'
-                        crear_orden_market(SYMBOL, close_side, qty_cerrar, reduce_only=True)
-                        trade['qty_remaining'] -= qty_cerrar
-                        pnl = (tp1_price - entry) * qty_cerrar if side == 'Buy' else (entry - tp1_price) * qty_cerrar
-                        actualizar_estadisticas(pnl)
-
-                        # Mover SL a breakeven
-                        nuevo_sl = entry
-                        if order_id_sl:
-                            try:
-                                cancelar_orden(order_id_sl, SYMBOL)
-                            except:
-                                pass
-                        try:
-                            new_sl_order = crear_orden_stop_market(
-                                SYMBOL,
-                                'Sell' if side == 'Buy' else 'Buy',
-                                trade['qty_remaining'],
-                                nuevo_sl,
-                                reduce_only=True
-                            )
-                            trade['order_id_sl'] = new_sl_order.get('orderId')
-                        except Exception as e:
-                            logger.error(f"Error creando nuevo SL (BE): {e}")
-
-                        # Crear TP2 para el remanente
-                        try:
-                            tp2_side = 'Sell' if side == 'Buy' else 'Buy'
-                            tp2_order = crear_orden_limit(SYMBOL, tp2_side, trade['qty_remaining'], tp2_price, reduce_only=True)
-                            trade['order_id_tp2'] = tp2_order.get('orderId')
-                        except Exception as e:
-                            logger.error(f"Error creando TP2: {e}")
-
-                        trade['status'] = 'TP1_HIT'
-                        trade['sl_price'] = nuevo_sl
-
-                        mensaje = (
-                            f"🔓 CIERRE PARCIAL #{trade_id} - TP1 alcanzado\n"
-                            f"💰 Precio: {tp1_price:.2f}\n"
-                            f"📊 PnL Parcial: {pnl:.4f} USD\n"
-                            f"🔄 SL movido a BE ({nuevo_sl:.2f})\n"
-                            f"🎯 Buscando TP2 ({tp2_price:.2f}) | Restante: {trade['qty_remaining']:.6f} BTC"
+                        new_sl_order = crear_orden_stop_market(
+                            SYMBOL,
+                            'Sell' if side == 'Buy' else 'Buy',
+                            trade['qty_remaining'],
+                            nuevo_sl,
+                            reduce_only=True
                         )
-                        telegram_mensaje(mensaje)
-
-                        fig = generar_grafico_entrada(
-                            df=df_actual,
-                            decision=side,
-                            soporte=trade['estado_entrada']['soporte'],
-                            resistencia=trade['estado_entrada']['resistencia'],
-                            slope=trade['estado_entrada']['slope'],
-                            intercept=trade['estado_entrada']['intercept'],
-                            razones=trade['razones'],
-                            estado=trade['estado_entrada'],
-                            precio_salida=tp1_price,
-                            trade_id=trade_id
-                        )
-                        if fig:
-                            telegram_grafico(fig)
-                            plt.close(fig)
+                        trade['order_id_sl'] = new_sl_order.get('orderId')
                     except Exception as e:
-                        logger.error(f"Error en cierre parcial TP1: {e}")
+                        logger.error(f"Error creando nuevo SL (BE): {e}")
+
+                    try:
+                        tp2_side = 'Sell' if side == 'Buy' else 'Buy'
+                        tp2_order = crear_orden_limit(SYMBOL, tp2_side, trade['qty_remaining'], tp2_price, reduce_only=True)
+                        trade['order_id_tp2'] = tp2_order.get('orderId')
+                    except Exception as e:
+                        logger.error(f"Error creando TP2: {e}")
+
+                    trade['status'] = 'TP1_HIT'
+                    trade['sl_price'] = nuevo_sl
+
+                    mensaje = (
+                        f"🔓 CIERRE PARCIAL #{trade_id} - TP1 alcanzado\n"
+                        f"💰 Precio: {tp1_price:.2f}\n"
+                        f"📊 PnL Parcial: {pnl:.4f} USD\n"
+                        f"🔄 SL movido a BE ({nuevo_sl:.2f})\n"
+                        f"🎯 Buscando TP2 ({tp2_price:.2f}) | Restante: {trade['qty_remaining']:.6f} BTC"
+                    )
+                    telegram_mensaje(mensaje)
+
+                    fig = generar_grafico_entrada(
+                        df=df_actual,
+                        decision=side,
+                        soporte=trade['estado_entrada']['soporte'],
+                        resistencia=trade['estado_entrada']['resistencia'],
+                        slope=trade['estado_entrada']['slope'],
+                        intercept=trade['estado_entrada']['intercept'],
+                        razones=trade['razones'],
+                        estado=trade['estado_entrada'],
+                        precio_salida=tp1_price,
+                        trade_id=trade_id
+                    )
+                    if fig:
+                        telegram_grafico(fig)
+                        plt.close(fig)
+
+                except Exception as e:
+                    logger.error(f"Error en cierre parcial TP1: {e}")
                 continue
 
-        # Estado TP1_HIT: verificar TP2
+        # -------- TP1_HIT: TP2 y trailing --------
         if status == 'TP1_HIT':
             tp2_alcanzado = False
             if side == 'Buy' and precio_actual >= tp2_price:
@@ -1019,7 +1026,6 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                 tp2_alcanzado = True
 
             if tp2_alcanzado:
-                # Mover SL a TP2 y activar trailing
                 nuevo_sl = tp2_price
                 if order_id_sl:
                     try:
@@ -1050,7 +1056,7 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                 telegram_mensaje(mensaje)
                 continue
 
-        # Estado TP2_HIT: trailing stop dinámico
+        # -------- TP2_HIT: trailing --------
         if status == 'TP2_HIT':
             if side == 'Buy':
                 nuevo_sl = precio_actual - TRAILING_OFFSET_ATR * atr
@@ -1071,7 +1077,6 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                     except Exception as e:
                         logger.error(f"Error modificando SL trailing: {e}")
 
-    # Remover trades cerrados
     for idx in sorted(trades_a_remover, reverse=True):
         del ACTIVE_TRADES[idx]
 
@@ -1087,10 +1092,10 @@ def run_bot():
         logger.error(f"Error al establecer apalancamiento: {e}")
         telegram_mensaje(f"⚠️ Error apalancamiento: {e}")
 
-    telegram_mensaje("🤖 BOT V90.6 REAL CON TP1/TP2 Y TRAILING INICIADO\n"
+    telegram_mensaje("🤖 BOT V90.6 REAL INICIADO (CON TRAILING)\n"
                      f"📊 Velas: {INTERVAL}m | Máx. posiciones: {MAX_OPEN_TRADES}\n"
                      f"⚡ Leverage: {LEVERAGE}x | Tamaño: {QTY_BTC} BTC\n"
-                     f"🔒 TP1 50% | Trailing Stop post-TP2 ({TRAILING_OFFSET_ATR} ATR)")
+                     f"🔒 SL = {SL_MULTIPLIER} ATR | TP1 50% | Trailing post-TP2 ({TRAILING_OFFSET_ATR} ATR)")
 
     ultima_fecha = None
 
