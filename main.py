@@ -140,8 +140,10 @@ def bybit_request(endpoint, method='GET', params=None, payload=None):
         param_str = query_string
     else:  # POST
         full_url = f"{BASE_URL}{endpoint}"
-        # 🔥 CORRECCIÓN DEFINITIVA: JSON compacto, claves ordenadas
-        param_str = json.dumps(payload, separators=(',', ':'), ensure_ascii=False, sort_keys=True)
+        # 🔥 GENERAMOS EL CUERPO JSON CON CLAVES ORDENADAS Y ESPACIOS (DEFAULT)
+        # Esto asegura que el cuerpo y la firma coincidan exactamente.
+        body = json.dumps(payload, sort_keys=True)
+        param_str = body
 
     sign_str = timestamp + BYBIT_API_KEY + recv_window + param_str
     signature = hmac.new(
@@ -161,7 +163,8 @@ def bybit_request(endpoint, method='GET', params=None, payload=None):
     if method == 'GET':
         response = requests.get(full_url, headers=headers, timeout=15)
     else:
-        response = requests.post(full_url, headers=headers, json=payload, timeout=15)
+        # Enviamos el mismo 'body' que usamos para la firma
+        response = requests.post(full_url, headers=headers, data=body, timeout=15)
 
     if response.status_code != 200:
         raise Exception(f"HTTP {response.status_code} - {response.text}")
