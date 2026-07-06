@@ -6,7 +6,7 @@
 # - TP2 dinámico + TRAILING STOP (0.75 ATR) post-TP2
 # - Tamaño fijo: 0.002 BTC (para cumplir mínimo en órdenes limit)
 # - SL = 2.0 ATR (más amplio para evitar cierres prematuros)
-# - Identificador único (#ID) para cada operación
+# - Se recalcula SL/TP después de la entrada para evitar ejecución inmediata
 # ============================================================
 
 import os
@@ -769,7 +769,7 @@ def generar_grafico_entrada(df, decision, soporte, resistencia, slope, intercept
         return None
 
 # ============================================================
-# GESTIÓN DE POSICIONES REALES (CON TP1, TP2 Y TRAILING)
+# GESTIÓN DE POSICIONES REALES (CON RECÁLCULO DE SL/TP POST-ENTRADA)
 # ============================================================
 
 def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, tiempo, estado, df):
@@ -780,22 +780,12 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
 
     qty = QTY_BTC
 
-    if decision == "Buy":
-        sl_price = round(precio - SL_MULTIPLIER * atr, 2)
-        tp1_price = round(min(resistencia, precio + 2.0 * atr), 2)
-        tp2_price = round(precio + 3.5 * atr, 2)
-        side = "Buy"
-    else:
-        sl_price = round(precio + SL_MULTIPLIER * atr, 2)
-        tp1_price = round(max(soporte, precio - 2.0 * atr), 2)
-        tp2_price = round(precio - 3.5 * atr, 2)
-        side = "Sell"
-
-    # 1. Entrada Market
+    # 1. Entrada Market (sin SL/TP todavía)
+    side = "Buy" if decision == "Buy" else "Sell"
     logger.info(f"Enviando orden {side} Market por {qty} BTC...")
     try:
         crear_orden_market(SYMBOL, side, qty, reduce_only=False)
-        time.sleep(1)
+        time.sleep(2)  # Esperar a que la posición se refleje
         posiciones = obtener_posiciones_abiertas()
         pos_actual = None
         for p in posiciones:
@@ -805,15 +795,29 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
         if not pos_actual:
             raise Exception("No se encontró la posición recién abierta")
         entry_price = float(pos_actual.get('avgPrice', precio))
+        logger.info(f"Entrada ejecutada a {entry_price:.2f}")
     except Exception as e:
         logger.error(f"Error abriendo posición: {e}")
         return None
 
-    # 2. Órdenes TP1 (50%) y SL (total)
+    # 2. Recalcular SL, TP1, TP2 basados en el precio de entrada real
+    if decision == "Buy":
+        sl_price = round(entry_price - SL_MULTIPLIER * atr, 2)
+        tp1_price = round(min(resistencia, entry_price + 2.0 * atr), 2)
+        tp2_price = round(entry_price + 3.5 * atr, 2)
+    else:
+        sl_price = round(entry_price + SL_MULTIPLIER * atr, 2)
+        tp1_price = round(max(soporte, entry_price - 2.0 * atr), 2)
+        tp2_price = round(entry_price - 3.5 * atr, 2)
+
+    logger.info(f"SL: {sl_price:.2f}, TP1: {tp1_price:.2f}, TP2: {tp2_price:.2f}")
+
+    # 3. Crear órdenes TP1 (50%) y SL (total)
     qty_half = qty / 2
     try:
         tp1_order = crear_orden_limit(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty_half, tp1_price, reduce_only=True)
         tp1_order_id = tp1_order.get('orderId')
+        logger.info(f"TP1 orden creada: {tp1_order_id}")
     except Exception as e:
         logger.error(f"Error creando TP1: {e}")
         tp1_order_id = None
@@ -821,6 +825,7 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
     try:
         sl_order = crear_orden_stop_market(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty, sl_price, reduce_only=True)
         sl_order_id = sl_order.get('orderId')
+        logger.info(f"SL orden creada: {sl_order_id}")
     except Exception as e:
         logger.error(f"Error creando SL: {e}")
         sl_order_id = None
@@ -936,6 +941,7 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
         # -------- SL --------
         if (side == 'Buy' and precio_actual <= sl_price) or (side == 'Sell' and precio_actual >= sl_price):
             telegram_mensaje(f"⚠️ SL alcanzado para #{trade_id} (precio {precio_actual:.2f})")
+            # No removemos la posición aquí porque la API la cerrará y la detectaremos en el próximo ciclo.
             continue
 
         # -------- ACTIVE: TP1 --------
@@ -1092,7 +1098,7 @@ def run_bot():
         logger.error(f"Error al establecer apalancamiento: {e}")
         telegram_mensaje(f"⚠️ Error apalancamiento: {e}")
 
-    telegram_mensaje("🤖 BOT V90.6 REAL INICIADO (CON TRAILING)\n"
+    telegram_mensaje("🤖 BOT V90.6 REAL INICIADO (CON TRAILING Y RECÁLCULO)\n"
                      f"📊 Velas: {INTERVAL}m | Máx. posiciones: {MAX_OPEN_TRADES}\n"
                      f"⚡ Leverage: {LEVERAGE}x | Tamaño: {QTY_BTC} BTC\n"
                      f"🔒 SL = {SL_MULTIPLIER} ATR | TP1 50% | Trailing post-TP2 ({TRAILING_OFFSET_ATR} ATR)")
