@@ -889,26 +889,20 @@ def actualizar_estadisticas(pnl):
     TRADES_DESDE_RESUMEN += 1
     PNL_GLOBAL += pnl
 
-    # Restar comisión (0.06% del nominal de la operación)
-    # Estimamos nominal como qty * precio (usamos precio de entrada para simplificar)
-    # Como no tenemos el precio exacto aquí, lo dejamos para el resumen.
-    # Acumulamos pnl sin comisiones primero, luego en el resumen restamos las comisiones globales.
-
     if pnl > 0:
         TRADES_WIN += 1
     else:
         TRADES_LOSS += 1
 
+# ============================================================
+# FUNCIÓN DE RESUMEN CORREGIDA (con global TRADES_WIN y TRADES_LOSS)
+# ============================================================
 def enviar_resumen_balance():
     global PNL_GLOBAL, PNL_GLOBAL_NETO, TRADES_DESDE_RESUMEN, TRADES_TOTALES
+    global TRADES_WIN, TRADES_LOSS          # <--- CORRECCIÓN AQUÍ
+
     if TRADES_DESDE_RESUMEN >= 10:
-        # Calcular comisiones estimadas (entrada + salida) = 0.06% * 2? Normalmente se paga solo por orden ejecutada.
-        # Asumimos 0.06% por cada orden (entrada y salida). En total 0.12% del nominal, pero simplificamos a 0.1% promedio.
-        # Usamos 0.06% por operación (ida y vuelta) porque Bybit cobra 0.06% taker y 0.04% maker. Aproximamos 0.06% * 2 = 0.12%.
-        # Para ser conservadores, usamos 0.06% por cada orden ejecutada (entrada + salida) = 0.12% del nominal.
-        # Como no tenemos el nominal exacto, estimamos basado en el PnL promedio.
-        # Mejor: calculamos comisión sobre el nominal total operado.
-        # Tomamos un nominal promedio de QTY_BTC * precio_medio. Usamos 60000 como referencia.
+        # Calcular comisiones estimadas
         nominal_medio = QTY_BTC * 60000  # 0.002 * 60000 = 120 USD
         comision_por_trade = nominal_medio * 0.0012  # 0.12% (entrada + salida)
         comision_total = comision_por_trade * TRADES_DESDE_RESUMEN
@@ -1007,8 +1001,12 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                     telegram_grafico(fig)
                     plt.close(fig)
 
-                # Enviar resumen cada 10 trades
-                enviar_resumen_balance()
+                # Enviar resumen cada 10 trades (con protección extra)
+                try:
+                    enviar_resumen_balance()
+                except Exception as e:
+                    logger.error(f"Error al enviar resumen: {e}")
+                    # No detenemos el flujo
 
             trades_a_remover.append(idx)
             continue
