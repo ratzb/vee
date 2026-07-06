@@ -140,8 +140,8 @@ def bybit_request(endpoint, method='GET', params=None, payload=None):
         param_str = query_string
     else:  # POST
         full_url = f"{BASE_URL}{endpoint}"
-        # 🔥 CORRECCIÓN: param_str debe ser el JSON del payload (sin espacios)
-        param_str = json.dumps(payload, separators=(',', ':'), ensure_ascii=False)
+        # 🔥 CORRECCIÓN DEFINITIVA: JSON compacto, claves ordenadas
+        param_str = json.dumps(payload, separators=(',', ':'), ensure_ascii=False, sort_keys=True)
 
     sign_str = timestamp + BYBIT_API_KEY + recv_window + param_str
     signature = hmac.new(
@@ -944,7 +944,6 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
 
         # -------- SL --------
         if (side == 'Buy' and precio_actual <= sl_price) or (side == 'Sell' and precio_actual >= sl_price):
-            # La orden stop se ejecutará automáticamente; solo notificamos.
             telegram_mensaje(f"⚠️ SL alcanzado para #{trade_id} (precio {precio_actual:.2f})")
             continue
 
