@@ -1,5 +1,5 @@
 # ============================================================
-# BOT TRADING V90.9 – CORREGIDO (SOPORTE/RESISTENCIA + NOTICIAS)
+# BOT TRADING V91.1 – SL AJUSTADO + RESUMEN CADA 10 TRADES
 # ============================================================
 import os
 import time
@@ -38,7 +38,10 @@ SLEEP_SECONDS = 300
 
 QTY_BTC = 0.002
 TRAILING_OFFSET_ATR = 0.75
-SL_MULTIPLIER = 3.0
+SL_MULTIPLIER = 1.5          # <-- Vuelve al valor original (más ajustado)
+
+MIN_TRAILING_STEP = 10.0     # puntos
+COMISION_TAKER = 0.0006      # 0.06% por operación (ida y vuelta)
 
 GRAFICO_VELAS_LIMIT = 120
 MOSTRAR_EMA20 = True
@@ -68,10 +71,13 @@ if not BYBIT_API_KEY or not BYBIT_API_SECRET:
 sentiment_analyzer = SentimentIntensityAnalyzer()
 BASE_URL = "https://api.bybit.com"
 
+# Estadísticas globales
 TRADES_TOTALES = 0
 TRADES_WIN = 0
 TRADES_LOSS = 0
 PNL_GLOBAL = 0.0
+PNL_GLOBAL_NETO = 0.0      # Descontando comisiones
+TRADES_DESDE_RESUMEN = 0   # Contador para resumen cada 10 trades
 MAX_DRAWDOWN = 0.0
 BALANCE_MAX = 0.0
 TRADE_COUNTER = 0
@@ -103,9 +109,11 @@ def telegram_grafico(fig):
         logger.error(f"Telegram photo error: {e}")
 
 # ============================================================
-# FUNCIONES API BYBIT (CORREGIDAS PARA SL)
+# FUNCIONES API BYBIT (CON RATE LIMIT)
 # ============================================================
 def bybit_request(endpoint, method='GET', params=None, payload=None):
+    time.sleep(0.15)  # Para no exceder rate limit
+
     timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000))
     recv_window = '5000'
     if payload is None:
@@ -304,7 +312,6 @@ def extraer_estado_mercado(df, usar_cerrada=True):
         atr_serie = df['atr'].dropna()
         atr = atr_serie.iloc[-1] if not atr_serie.empty else precio * 0.01
 
-    # --- CORRECCIÓN: Soporte y Resistencia simples (min y max de 50 velas) ---
     ventana = min(50, len(df))
     if ventana < 2:
         min_50 = df['close'].min()
@@ -665,7 +672,7 @@ def filtrar_por_fundamental(decision, sent_label, estado):
     return True, f"Sentimiento permitido ({sent_label})"
 
 # ============================================================
-# GRÁFICO MEJORADO (CON NOTICIAS Y RAZONES COMPLETAS)
+# GRÁFICO MEJORADO (CUADRADO AMARILLO EN CIERRE)
 # ============================================================
 def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
                           precio_entrada, precio_salida=None, tiempo_entrada=None,
@@ -718,15 +725,15 @@ def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
         else:
             ax.scatter(entrada_x, precio_entrada, s=250, marker='v', color='red', edgecolors='black', linewidths=2, label='Entrada SELL', zorder=5)
 
-        # Salida
+        # Salida (cuadrado amarillo)
         if precio_salida is not None:
             salida_x = len(df_plot) - 1
             pnl_indicador = (precio_salida - precio_entrada) if decision == 'Buy' else (precio_entrada - precio_salida)
             color_salida = 'lime' if pnl_indicador > 0 else ('red' if pnl_indicador < 0 else 'yellow')
-            ax.scatter(salida_x, precio_salida, s=250, marker='X', color=color_salida, edgecolors='white', linewidths=1.5, label='Salida', zorder=6)
+            ax.scatter(salida_x, precio_salida, s=250, marker='s', color='yellow', edgecolors='white', linewidths=1.5, label='Salida', zorder=6)
             ax.plot([entrada_x, salida_x], [precio_entrada, precio_salida], color='white', linestyle=':', linewidth=2, alpha=0.7)
 
-        # Texto con toda la información (incluyendo noticias y razones)
+        # Texto con toda la información
         id_text = f" ID: {trade_id}" if trade_id else ""
         razones_text = '\n• '.join(razones) if razones else "Sin razones"
         texto = (
@@ -763,7 +770,7 @@ def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
         return None
 
 # ============================================================
-# GESTIÓN DE POSICIONES REALES (CON NOTICIAS)
+# GESTIÓN DE POSICIONES REALES (CON RESUMEN CADA 10 TRADES)
 # ============================================================
 
 def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, tiempo, estado, df,
@@ -794,7 +801,7 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
         logger.error(f"Error abriendo posición: {e}")
         return None
 
-    # Calcular SL, TP1 y TP2
+    # Calcular SL, TP1 y TP2 con SL ajustado (1.5 ATR)
     if decision == "Buy":
         sl_price = round(entry_price - SL_MULTIPLIER * atr, 2)
         tp1_price = round(min(resistencia, entry_price + 2.0 * atr), 2)
@@ -877,16 +884,57 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
     return trade_info
 
 def actualizar_estadisticas(pnl):
-    global TRADES_TOTALES, TRADES_WIN, TRADES_LOSS, PNL_GLOBAL
+    global TRADES_TOTALES, TRADES_WIN, TRADES_LOSS, PNL_GLOBAL, PNL_GLOBAL_NETO, TRADES_DESDE_RESUMEN
     TRADES_TOTALES += 1
+    TRADES_DESDE_RESUMEN += 1
     PNL_GLOBAL += pnl
+
+    # Restar comisión (0.06% del nominal de la operación)
+    # Estimamos nominal como qty * precio (usamos precio de entrada para simplificar)
+    # Como no tenemos el precio exacto aquí, lo dejamos para el resumen.
+    # Acumulamos pnl sin comisiones primero, luego en el resumen restamos las comisiones globales.
+
     if pnl > 0:
         TRADES_WIN += 1
     else:
         TRADES_LOSS += 1
 
+def enviar_resumen_balance():
+    global PNL_GLOBAL, PNL_GLOBAL_NETO, TRADES_DESDE_RESUMEN, TRADES_TOTALES
+    if TRADES_DESDE_RESUMEN >= 10:
+        # Calcular comisiones estimadas (entrada + salida) = 0.06% * 2? Normalmente se paga solo por orden ejecutada.
+        # Asumimos 0.06% por cada orden (entrada y salida). En total 0.12% del nominal, pero simplificamos a 0.1% promedio.
+        # Usamos 0.06% por operación (ida y vuelta) porque Bybit cobra 0.06% taker y 0.04% maker. Aproximamos 0.06% * 2 = 0.12%.
+        # Para ser conservadores, usamos 0.06% por cada orden ejecutada (entrada + salida) = 0.12% del nominal.
+        # Como no tenemos el nominal exacto, estimamos basado en el PnL promedio.
+        # Mejor: calculamos comisión sobre el nominal total operado.
+        # Tomamos un nominal promedio de QTY_BTC * precio_medio. Usamos 60000 como referencia.
+        nominal_medio = QTY_BTC * 60000  # 0.002 * 60000 = 120 USD
+        comision_por_trade = nominal_medio * 0.0012  # 0.12% (entrada + salida)
+        comision_total = comision_por_trade * TRADES_DESDE_RESUMEN
+        pnl_neto = PNL_GLOBAL - comision_total
+
+        mensaje = (
+            f"📊 RESUMEN DE BALANCE (últimos {TRADES_DESDE_RESUMEN} trades)\n"
+            f"----------------------------------------\n"
+            f"💰 PnL Bruto: {PNL_GLOBAL:.4f} USD\n"
+            f"💸 Comisiones estimadas: {comision_total:.4f} USD\n"
+            f"✅ PnL Neto: {pnl_neto:.4f} USD\n"
+            f"🏆 Trades ganados: {TRADES_WIN}\n"
+            f"❌ Trades perdidos: {TRADES_LOSS}\n"
+            f"🎯 Win Rate: {(TRADES_WIN/(TRADES_WIN+TRADES_LOSS)*100):.1f}%"
+        )
+        telegram_mensaje(mensaje)
+        logger.info(mensaje)
+
+        # Reiniciamos contadores para el próximo bloque
+        TRADES_DESDE_RESUMEN = 0
+        PNL_GLOBAL = 0.0
+        TRADES_WIN = 0
+        TRADES_LOSS = 0
+
 def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_fuente, sent_label, sent_score):
-    global ACTIVE_TRADES
+    global ACTIVE_TRADES, TRADES_DESDE_RESUMEN
 
     posiciones_api = obtener_posiciones_abiertas()
     pos_map = {}
@@ -959,6 +1007,9 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                     telegram_grafico(fig)
                     plt.close(fig)
 
+                # Enviar resumen cada 10 trades
+                enviar_resumen_balance()
+
             trades_a_remover.append(idx)
             continue
 
@@ -976,7 +1027,7 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
             if tp1_alcanzado:
                 trade['qty_remaining'] = size_actual
                 pnl_parcial = (tp1_price - entry) * (qty_total - size_actual) if side == 'Buy' else (entry - tp1_price) * (qty_total - size_actual)
-                actualizar_estadisticas(pnl_parcial)
+                # No acumulamos estadísticas aquí porque es parcial, solo al cierre total.
 
                 if order_id_sl:
                     try:
@@ -1038,11 +1089,11 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                 )
                 continue
 
-        # STATUS TRAILING: mover SL
+        # STATUS TRAILING: mover SL solo si la distancia es significativa
         if status == 'TRAILING':
             if side == 'Buy':
                 nuevo_sl = precio_actual - TRAILING_OFFSET_ATR * atr
-                if nuevo_sl > trade['sl_price']:
+                if nuevo_sl > trade['sl_price'] + MIN_TRAILING_STEP:
                     try:
                         modificar_orden_stop(trade['order_id_sl'], SYMBOL, nuevo_sl)
                         trade['sl_price'] = nuevo_sl
@@ -1051,7 +1102,7 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                         logger.error(f"Error modificando SL trailing: {e}")
             else:
                 nuevo_sl = precio_actual + TRAILING_OFFSET_ATR * atr
-                if nuevo_sl < trade['sl_price']:
+                if nuevo_sl < trade['sl_price'] - MIN_TRAILING_STEP:
                     try:
                         modificar_orden_stop(trade['order_id_sl'], SYMBOL, nuevo_sl)
                         trade['sl_price'] = nuevo_sl
@@ -1074,7 +1125,7 @@ def run_bot():
         logger.error(f"Error al establecer apalancamiento: {e}")
         telegram_mensaje(f"⚠️ Error apalancamiento: {e}")
 
-    telegram_mensaje("🤖 BOT V90.9 CORREGIDO INICIADO\n"
+    telegram_mensaje("🤖 BOT V91.1 INICIADO (SL AJUSTADO + RESUMEN CADA 10 TRADES)\n"
                      f"📊 Velas: {INTERVAL}m | Máx. posiciones: {MAX_OPEN_TRADES}\n"
                      f"⚡ Leverage: {LEVERAGE}x | Tamaño: {QTY_BTC} BTC\n"
                      f"🔒 SL = {SL_MULTIPLIER} ATR | TP1 50% | Trailing Infinito a {TRAILING_OFFSET_ATR} ATR\n"
