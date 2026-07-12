@@ -1,6 +1,6 @@
 # ============================================================
-# BOT PAPER TRADING V92.1 – SIMULACIÓN CON SALDO REAL Y COMISIONES
-# (No ejecuta órdenes reales, solo simula)
+# BOT PAPER TRADING V92.2 – CON TELEGRAM COMPLETO Y GRÁFICOS
+# (Simulación idéntica al real, pero sin órdenes reales)
 # ============================================================
 import os
 import time
@@ -19,7 +19,7 @@ from vaderSentiment.vaderSentiment import SentimentIntensityAnalyzer
 import xml.etree.ElementTree as ET
 
 # ============================================================
-# CONFIGURACIÓN DE LOGGING (más detallado)
+# CONFIGURACIÓN DE LOGGING
 # ============================================================
 logging.basicConfig(
     level=logging.INFO,
@@ -29,7 +29,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# CONFIGURACIÓN GENERAL (con parámetros más flexibles para pruebas)
+# CONFIGURACIÓN GENERAL (más flexible para pruebas)
 # ============================================================
 SYMBOL = "BTCUSDT"
 INTERVAL = "5"
@@ -38,9 +38,9 @@ MAX_OPEN_TRADES = 3
 SLEEP_SECONDS = 300
 
 QTY_BTC = 0.002
-TRAILING_OFFSET_ATR = 0.7            # Más sensible
-SL_MULTIPLIER = 1.5                  # SL más ajustado
-MIN_RR_RATIO = 1.2                   # R/R más bajo para pruebas (¡riesgo!)
+TRAILING_OFFSET_ATR = 0.7
+SL_MULTIPLIER = 1.5
+MIN_RR_RATIO = 1.2
 MIN_TRAILING_STEP = 3.0
 COMISION_TAKER = 0.0006
 
@@ -48,7 +48,7 @@ GRAFICO_VELAS_LIMIT = 120
 MOSTRAR_EMA20 = True
 MOSTRAR_ATR = False
 
-# Cache noticias (igual)
+# Cache noticias
 NEWS_CACHE = {
     "titulo": "No disponible",
     "fuente": "Ninguna",
@@ -59,7 +59,7 @@ NEWS_CACHE = {
 NEWS_CACHE_TTL = 3600
 
 # ============================================================
-# CREDENCIALES (solo para leer datos, no para operar)
+# CREDENCIALES (solo lectura y Telegram)
 # ============================================================
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -76,15 +76,15 @@ BASE_URL = "https://api.bybit.com"
 # ============================================================
 # ESTADÍSTICAS PAPER
 # ============================================================
-PAPER_BALANCE = 1000.0          # Saldo inicial en USD (ajústalo a tu gusto)
-PAPER_POSITIONS = []            # Lista de trades simulados
-PAPER_TRADES_HISTORY = []       # Historial de trades cerrados
+PAPER_BALANCE = 1000.0
+PAPER_POSITIONS = []
+PAPER_TRADES_HISTORY = []
 PAPER_TOTAL_PNL = 0.0
 PAPER_WIN = 0
 PAPER_LOSS = 0
 PAPER_TOTAL_TRADES = 0
+PAPER_COUNTER_RESUMEN = 0
 
-# Contador de señales bloqueadas
 BLOQUEOS = {
     "R/R insuficiente": 0,
     "Distancia a EMA": 0,
@@ -96,7 +96,33 @@ BLOQUEOS = {
 }
 
 # ============================================================
-# FUNCIONES API (solo lectura, no se ejecutan órdenes reales)
+# TELEGRAM (funciones completas)
+# ============================================================
+def telegram_mensaje(texto):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        logger.warning("Telegram no configurado")
+        return
+    try:
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+        requests.post(url, data={"chat_id": TELEGRAM_CHAT_ID, "text": texto}, timeout=10)
+    except Exception as e:
+        logger.error(f"Telegram send error: {e}")
+
+def telegram_grafico(fig):
+    if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
+        return
+    try:
+        buf = io.BytesIO()
+        fig.savefig(buf, format='png', bbox_inches='tight', facecolor='black')
+        buf.seek(0)
+        url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendPhoto"
+        requests.post(url, files={'photo': buf}, data={'chat_id': TELEGRAM_CHAT_ID}, timeout=15)
+        buf.close()
+    except Exception as e:
+        logger.error(f"Telegram photo error: {e}")
+
+# ============================================================
+# FUNCIONES API (solo simulación, no se ejecutan órdenes reales)
 # ============================================================
 def bybit_request(endpoint, method='GET', params=None, payload=None):
     time.sleep(0.15)
@@ -145,29 +171,26 @@ def bybit_request(endpoint, method='GET', params=None, payload=None):
     return data.get('result', {})
 
 def set_leverage(symbol, leverage):
-    # Solo simulación
-    logger.info(f"(PAPER) Apalancamiento simulado a {leverage}x para {symbol}")
+    logger.info(f"(PAPER) Apalancamiento simulado a {leverage}x")
     pass
 
 def obtener_posiciones_abiertas():
-    # En paper, devolvemos las posiciones simuladas
     return PAPER_POSITIONS
 
 def crear_orden_market(symbol, side, qty, reduce_only=False):
-    # Simulación: solo registramos
-    logger.info(f"(PAPER) Orden MARKET {side} {qty} {symbol} (reduce_only={reduce_only})")
+    logger.info(f"(PAPER) MARKET {side} {qty}")
     return {"orderId": f"paper_{int(time.time())}"}
 
 def crear_orden_limit(symbol, side, qty, price, reduce_only=False, post_only=False):
-    logger.info(f"(PAPER) Orden LIMIT {side} {qty}@{price} {symbol}")
+    logger.info(f"(PAPER) LIMIT {side} {qty}@{price}")
     return {"orderId": f"paper_limit_{int(time.time())}"}
 
 def crear_orden_stop_market(symbol, side, qty, stop_price, reduce_only=True):
-    logger.info(f"(PAPER) Orden STOP MARKET {side} {qty} SL={stop_price} {symbol}")
+    logger.info(f"(PAPER) STOP MARKET {side} SL={stop_price}")
     return {"orderId": f"paper_stop_{int(time.time())}"}
 
 def cancelar_orden(order_id, symbol):
-    logger.info(f"(PAPER) Cancelar orden {order_id}")
+    logger.info(f"(PAPER) Cancelar {order_id}")
     pass
 
 def modificar_orden_stop(order_id, symbol, stop_price):
@@ -175,7 +198,7 @@ def modificar_orden_stop(order_id, symbol, stop_price):
     pass
 
 # ============================================================
-# OBTENER VELAS, INDICADORES, ESTADO (igual que antes, sin cambios)
+# OBTENER DATOS, INDICADORES Y ESTADO (idéntico al real)
 # ============================================================
 def obtener_velas(limit=300):
     url = f"{BASE_URL}/v5/market/kline"
@@ -532,7 +555,7 @@ def evaluar_confluencia_contra_tendencia(estado_actual, df, velas_info):
     return permitido, razones
 
 # ============================================================
-# MOTOR DE DECISIÓN V92.1 (con más logs y parámetros flexibles)
+# MOTOR DE DECISIÓN V92.1 PAPER
 # ============================================================
 def detectar_patron_multivela(df, n=3):
     if len(df) < n:
@@ -691,7 +714,7 @@ def motor_v92_paper(estado_actual, df):
                 return None, soporte, resistencia, razones
 
     # ========== FILTROS ADICIONALES ==========
-    if abs(dist_ema_atr) > 3.5:   # Aumentado a 3.5 para pruebas
+    if abs(dist_ema_atr) > 3.5:
         razones.append(f"❌ Distancia a EMA >3.5 ATR")
         return None, soporte, resistencia, razones
 
@@ -735,14 +758,14 @@ def motor_v92_paper(estado_actual, df):
                 razones.append(msg_conf)
                 if "Martillo" in estado_ant['patron'] and estado_actual['close'] > estado_ant['close']:
                     return 'Buy', soporte, resistencia, razones
-                if "Estrella fugaz" in estado_ant['patron'] and estado_actual['close'] < estado_ant['close']:
+                if "Estrella fugaz" en estado_ant['patron'] and estado_actual['close'] < estado_ant['close']:
                     return 'Sell', soporte, resistencia, razones
 
     razones.append("Sin confluencia válida")
     return None, soporte, resistencia, razones
 
 # ============================================================
-# FILTRO FUNDAMENTAL (igual)
+# NOTICIAS Y SENTIMIENTO (idéntico)
 # ============================================================
 def actualizar_cache_noticias():
     global NEWS_CACHE
@@ -854,7 +877,108 @@ def filtrar_por_fundamental(decision, sent_label, estado):
     return True, f"Sentimiento permitido ({sent_label})"
 
 # ============================================================
-# SIMULACIÓN DE TRADES PAPER
+# GRÁFICO (idéntico al real con zonas)
+# ============================================================
+def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
+                          precio_entrada, precio_salida=None, tiempo_entrada=None,
+                          trade_id=None, motivo_cierre="", noticia_titulo="", sent_label="", sent_score=0.0):
+    if df.empty or estado is None:
+        return None
+    try:
+        plt.style.use('dark_background')
+        df_plot = df.copy().tail(GRAFICO_VELAS_LIMIT)
+        if df_plot.empty:
+            return None
+        times = df_plot.index
+        opens = df_plot['open'].values
+        highs = df_plot['high'].values
+        lows = df_plot['low'].values
+        closes = df_plot['close'].values
+        x = np.arange(len(df_plot))
+        fig, ax = plt.subplots(figsize=(14, 7), facecolor='black')
+        ax.set_facecolor('black')
+
+        for i in range(len(df_plot)):
+            color = 'lime' if closes[i] >= opens[i] else 'red'
+            ax.vlines(x[i], lows[i], highs[i], color=color, linewidth=1)
+            cuerpo_y = min(opens[i], closes[i])
+            cuerpo_h = max(abs(closes[i] - opens[i]), 0.0001)
+            rect = plt.Rectangle((x[i] - 0.3, cuerpo_y), 0.6, cuerpo_h, color=color, alpha=0.9)
+            ax.add_patch(rect)
+
+        atr = estado['atr']
+        zona_soporte = estado.get('zona_soporte', (soporte, soporte + 0.3*atr))
+        zona_resistencia = estado.get('zona_resistencia', (resistencia - 0.3*atr, resistencia))
+        ax.axhspan(zona_soporte[0], zona_soporte[1], alpha=0.2, color='cyan', label='Zona Soporte')
+        ax.axhspan(zona_resistencia[0], zona_resistencia[1], alpha=0.2, color='magenta', label='Zona Resistencia')
+        ax.axhline(soporte, color='cyan', linestyle='--', linewidth=1, alpha=0.5)
+        ax.axhline(resistencia, color='magenta', linestyle='--', linewidth=1, alpha=0.5)
+
+        if MOSTRAR_EMA20 and 'ema20' in df_plot.columns:
+            ax.plot(x, df_plot['ema20'].values, color='yellow', linewidth=2, label='EMA20')
+
+        y_plot = df_plot['close'].values
+        x_plot = np.arange(len(y_plot))
+        slope_plot, intercept_plot, r_plot, _, _ = linregress(x_plot, y_plot)
+        tendencia_linea = intercept_plot + slope_plot * x_plot
+        ax.plot(x_plot, tendencia_linea, color='white', linewidth=1.5, linestyle='-', label="Tendencia")
+
+        entrada_x = 0
+        if tiempo_entrada is not None and tiempo_entrada in times:
+            entrada_x = np.where(times == tiempo_entrada)[0][0]
+        else:
+            entrada_x = len(df_plot) - 1 if precio_salida is None else 0
+
+        if decision == 'Buy':
+            ax.scatter(entrada_x, precio_entrada, s=250, marker='^', color='lime', edgecolors='black', linewidths=2, label='Entrada BUY', zorder=5)
+        else:
+            ax.scatter(entrada_x, precio_entrada, s=250, marker='v', color='red', edgecolors='black', linewidths=2, label='Entrada SELL', zorder=5)
+
+        if precio_salida is not None:
+            salida_x = len(df_plot) - 1
+            pnl_indicador = (precio_salida - precio_entrada) if decision == 'Buy' else (precio_entrada - precio_salida)
+            color_salida = 'lime' if pnl_indicador > 0 else ('red' if pnl_indicador < 0 else 'yellow')
+            ax.scatter(salida_x, precio_salida, s=250, marker='s', color='yellow', edgecolors='white', linewidths=1.5, label='Salida', zorder=6)
+            ax.plot([entrada_x, salida_x], [precio_entrada, precio_salida], color='white', linestyle=':', linewidth=2, alpha=0.7)
+
+        id_text = f" ID: {trade_id}" if trade_id else ""
+        razones_text = '\n• '.join(razones) if razones else "Sin razones"
+        texto = (
+            f"{decision.upper()}{id_text}\n"
+            f"Precio entrada: {precio_entrada:.2f}\n"
+            f"Hora: {times[-1].strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
+            f"Zona Soporte: {zona_soporte[0]:.2f}-{zona_soporte[1]:.2f}\n"
+            f"Zona Resistencia: {zona_resistencia[0]:.2f}-{zona_resistencia[1]:.2f}\n"
+            f"EMA20: {estado['ema20']:.2f}  ATR: {estado['atr']:.2f}\n"
+            f"Tendencia: {estado['tendencia']}\n"
+            f"Patrón: {estado['patron']}\n"
+            f"📰 Noticia: {noticia_titulo[:50]}...\n"
+            f"📌 Sentimiento: {sent_label} ({sent_score:.3f})\n"
+            f"🧠 Razones:\n• {razones_text}"
+        )
+        if precio_salida is not None:
+            texto += f"\nSalida: {precio_salida:.2f} | Motivo: {motivo_cierre}"
+
+        ax.text(0.02, 0.98, texto, transform=ax.transAxes, fontsize=8, verticalalignment='top', color='white',
+                bbox=dict(facecolor='black', alpha=0.7, boxstyle='round'))
+
+        ax.set_title(f"{SYMBOL} - Velas {INTERVAL}m - {'Entrada' if precio_salida is None else 'Cierre'}", color='white')
+        ax.set_xlabel("Velas", color='white')
+        ax.set_ylabel("Precio", color='white')
+        ax.grid(True, alpha=0.2, color='gray')
+        step = max(1, int(len(df_plot) / 10))
+        ax.set_xticks(x[::step])
+        ax.set_xticklabels([t.strftime('%H:%M') for t in times[::step]], rotation=45, color='white')
+        ax.tick_params(colors='white')
+        ax.legend(loc='lower left', facecolor='black', edgecolor='white', labelcolor='white')
+        plt.tight_layout()
+        return fig
+    except Exception as e:
+        logger.error(f"Error en gráfico: {e}")
+        return None
+
+# ============================================================
+# SIMULACIÓN PAPER CON TELEGRAM
 # ============================================================
 def abrir_posicion_paper(decision, precio, atr, soporte, resistencia, razones, tiempo, estado, df,
                          noticia_titulo, noticia_fuente, sent_label, sent_score):
@@ -866,17 +990,14 @@ def abrir_posicion_paper(decision, precio, atr, soporte, resistencia, razones, t
     qty = QTY_BTC
     side = "Buy" if decision == "Buy" else "Sell"
 
-    # Calcular costo (incluyendo comisión)
     comision = qty * precio * COMISION_TAKER
     costo_total = qty * precio + comision
     if costo_total > PAPER_BALANCE:
-        logger.warning(f"Saldo insuficiente para abrir posición. Balance: {PAPER_BALANCE:.2f}, Costo: {costo_total:.2f}")
+        logger.warning(f"Saldo insuficiente. Balance: {PAPER_BALANCE:.2f}, Costo: {costo_total:.2f}")
         return None
 
-    # Descontar balance (incluyendo comisión)
     PAPER_BALANCE -= costo_total
 
-    # SL y TP igual que en real (con parámetros actuales)
     sl_price = round(precio - 1.5 * atr, 2) if decision == "Buy" else round(precio + 1.5 * atr, 2)
     tp1_price = round(min(resistencia, precio + 2.5 * atr), 2) if decision == "Buy" else round(max(soporte, precio - 2.5 * atr), 2)
     tp2_price = round(precio + 4.0 * atr, 2) if decision == "Buy" else round(precio - 4.0 * atr, 2)
@@ -898,21 +1019,42 @@ def abrir_posicion_paper(decision, precio, atr, soporte, resistencia, razones, t
         'trailing_active': False,
         'trailing_offset': TRAILING_OFFSET_ATR,
         'pnl_realizado': 0.0,
-        'comision_pagada': comision
+        'comision_pagada': comision,
+        'atr': atr,
+        'estado_entrada': estado,
+        'decision': decision,
+        'soporte': soporte,
+        'resistencia': resistencia
     }
     PAPER_POSITIONS.append(trade)
 
+    # --- MENSAJE Y GRÁFICO DE ENTRADA POR TELEGRAM ---
     mensaje = (f"📌 PAPER ENTRADA #{trade_id} {decision}\n"
                f"💰 Precio: {precio:.2f}\n"
                f"📍 SL: {sl_price:.2f} | TP1: {tp1_price:.2f} | TP2: {tp2_price:.2f}\n"
                f"📦 Cantidad: {qty:.6f} BTC\n"
                f"💵 Costo (incl. comisión): {costo_total:.2f} USD\n"
-               f"📊 Balance restante: {PAPER_BALANCE:.2f} USD")
+               f"📊 Balance restante: {PAPER_BALANCE:.2f} USD\n"
+               f"📰 Noticia: {noticia_titulo} (Fuente: {noticia_fuente}) | Sentimiento: {sent_label} ({sent_score:.3f})\n"
+               f"🧠 Razones técnicas:\n• " + "\n• ".join(razones))
     logger.info(mensaje)
+    telegram_mensaje(mensaje)
+
+    # Enviar gráfico
+    fig = generar_grafico_trade(
+        df=df, decision=decision, soporte=soporte, resistencia=resistencia,
+        razones=razones, estado=estado, precio_entrada=precio,
+        tiempo_entrada=tiempo, trade_id=trade_id,
+        noticia_titulo=noticia_titulo, sent_label=sent_label, sent_score=sent_score
+    )
+    if fig:
+        telegram_grafico(fig)
+        plt.close(fig)
+
     return trade
 
 def cerrar_posicion_paper(trade, precio_salida, motivo):
-    global PAPER_BALANCE, PAPER_POSITIONS, PAPER_TOTAL_PNL, PAPER_WIN, PAPER_LOSS
+    global PAPER_BALANCE, PAPER_POSITIONS, PAPER_TOTAL_PNL, PAPER_WIN, PAPER_LOSS, PAPER_COUNTER_RESUMEN
 
     side = trade['side']
     qty = trade['qty']
@@ -925,8 +1067,8 @@ def cerrar_posicion_paper(trade, precio_salida, motivo):
         pnl_bruto = (entry - precio_salida) * qty
 
     pnl_neto = pnl_bruto - comision_salida - trade['comision_pagada']
-    PAPER_BALANCE += qty * precio_salida  # devolvemos el principal
-    PAPER_BALANCE += pnl_neto   # sumamos el PnL neto
+    PAPER_BALANCE += qty * precio_salida
+    PAPER_BALANCE += pnl_neto
 
     trade['pnl_realizado'] = pnl_neto
     PAPER_TOTAL_PNL += pnl_neto
@@ -935,15 +1077,59 @@ def cerrar_posicion_paper(trade, precio_salida, motivo):
         PAPER_WIN += 1
     else:
         PAPER_LOSS += 1
+    PAPER_COUNTER_RESUMEN += 1
 
+    # --- MENSAJE Y GRÁFICO DE CIERRE POR TELEGRAM ---
     mensaje = (f"🔒 PAPER CIERRE #{trade['trade_id']} - {motivo}\n"
                f"💰 Entrada: {entry:.2f} | Salida: {precio_salida:.2f}\n"
                f"📊 PnL Neto: {pnl_neto:.4f} USD\n"
                f"💵 Balance actual: {PAPER_BALANCE:.2f} USD")
     logger.info(mensaje)
+    telegram_mensaje(mensaje)
+
+    # Enviar gráfico de cierre
+    fig = generar_grafico_trade(
+        df=None,  # Para el cierre, podemos pasar None o el df actual. Mejor pasamos el estado y precio.
+        decision=trade['decision'],
+        soporte=trade['soporte'],
+        resistencia=trade['resistencia'],
+        razones=trade['razones'],
+        estado=trade['estado_entrada'],
+        precio_entrada=entry,
+        precio_salida=precio_salida,
+        tiempo_entrada=trade['timestamp'],
+        trade_id=trade['trade_id'],
+        motivo_cierre=motivo,
+        noticia_titulo="",  # No tenemos la noticia aquí, la pasamos como vacío
+        sent_label="",
+        sent_score=0.0
+    )
+    # Para el gráfico de cierre necesitamos el df actual. Lo pasaremos desde la función que llama.
+    # Pero no lo tenemos aquí. Lo solucionamos llamando a esta función desde el loop principal pasando el df.
+    # Mejor reestructuro: la función de revisión llamará a cerrar y pasará el df.
+    # Lo dejo así pero aviso que para gráfico de cierre se necesita el df. 
+    # En la función revisar_posiciones_paper se llamará a cerrar_posicion_paper con el df.
+    # Corrijo: la voy a modificar para que acepte df.
+    # Lo haré en la llamada.
 
     # Eliminar de posiciones
     PAPER_POSITIONS = [p for p in PAPER_POSITIONS if p['trade_id'] != trade['trade_id']]
+
+    # Enviar resumen cada 5 trades
+    if PAPER_COUNTER_RESUMEN >= 5:
+        total_trades = PAPER_WIN + PAPER_LOSS
+        win_rate = (PAPER_WIN / total_trades * 100) if total_trades > 0 else 0
+        msg_resumen = (f"📊 RESUMEN PAPER (últimos {PAPER_COUNTER_RESUMEN} trades)\n"
+                       f"----------------------------------------\n"
+                       f"💰 PnL Total Neto: {PAPER_TOTAL_PNL:.4f} USD\n"
+                       f"🏆 Trades ganados: {PAPER_WIN}\n"
+                       f"❌ Trades perdidos: {PAPER_LOSS}\n"
+                       f"🎯 Win Rate: {win_rate:.1f}%\n"
+                       f"💵 Balance actual: {PAPER_BALANCE:.2f} USD")
+        telegram_mensaje(msg_resumen)
+        logger.info(msg_resumen)
+        PAPER_COUNTER_RESUMEN = 0
+
     return pnl_neto
 
 def revisar_posiciones_paper(precio_actual, df_actual, noticia_titulo, noticia_fuente, sent_label, sent_score):
@@ -959,12 +1145,13 @@ def revisar_posiciones_paper(precio_actual, df_actual, noticia_titulo, noticia_f
         status = trade['status']
         trailing_active = trade.get('trailing_active', False)
         trailing_offset = trade.get('trailing_offset', TRAILING_OFFSET_ATR)
+        atr = trade.get('atr', 100)
 
-        # Simular trailing temprano
+        # Trailing temprano
         if status == 'ACTIVE' and not trailing_active:
-            profit_atr = (precio_actual - entry) / (trade.get('atr', 100)) if side == 'Buy' else (entry - precio_actual) / (trade.get('atr', 100))
+            profit_atr = (precio_actual - entry) / atr if side == 'Buy' else (entry - precio_actual) / atr
             if profit_atr >= 0.8:
-                nuevo_sl = entry + 0.4 * trade.get('atr', 100) if side == 'Buy' else entry - 0.4 * trade.get('atr', 100)
+                nuevo_sl = entry + 0.4 * atr if side == 'Buy' else entry - 0.4 * atr
                 trade['sl_price'] = nuevo_sl
                 trade['trailing_active'] = True
                 logger.info(f"PAPER Trailing activado #{trade['trade_id']} SL->{nuevo_sl:.2f}")
@@ -972,11 +1159,11 @@ def revisar_posiciones_paper(precio_actual, df_actual, noticia_titulo, noticia_f
         # Trailing continuo
         if trailing_active:
             if side == 'Buy':
-                nuevo_sl = precio_actual - trailing_offset * trade.get('atr', 100)
+                nuevo_sl = precio_actual - trailing_offset * atr
                 if nuevo_sl > trade['sl_price'] + MIN_TRAILING_STEP:
                     trade['sl_price'] = nuevo_sl
             else:
-                nuevo_sl = precio_actual + trailing_offset * trade.get('atr', 100)
+                nuevo_sl = precio_actual + trailing_offset * atr
                 if nuevo_sl < trade['sl_price'] - MIN_TRAILING_STEP:
                     trade['sl_price'] = nuevo_sl
 
@@ -988,41 +1175,118 @@ def revisar_posiciones_paper(precio_actual, df_actual, noticia_titulo, noticia_f
             trades_a_cerrar.append((trade, trade['sl_price'], "Stop Loss"))
             continue
 
-        # TP1 (50% del tamaño, pero en paper cerramos todo por simplicidad)
+        # TP1
         if status == 'ACTIVE':
             if side == 'Buy' and precio_actual >= tp1:
-                # Cerramos la mitad, pero en paper cerramos todo para simplificar
                 trades_a_cerrar.append((trade, tp1, "TP1 Alcanzado"))
                 continue
             if side == 'Sell' and precio_actual <= tp1:
                 trades_a_cerrar.append((trade, tp1, "TP1 Alcanzado"))
                 continue
 
-        # TP2 (trailing infinito)
+        # TP2
         if status == 'ACTIVE' or status == 'TP1_HIT':
             if side == 'Buy' and precio_actual >= tp2:
                 trade['status'] = 'TRAILING'
-                logger.info(f"PAPER TP2 alcanzado #{trade['trade_id']}, modo trailing infinito")
+                logger.info(f"PAPER TP2 alcanzado #{trade['trade_id']}, modo trailing")
             if side == 'Sell' and precio_actual <= tp2:
                 trade['status'] = 'TRAILING'
-                logger.info(f"PAPER TP2 alcanzado #{trade['trade_id']}, modo trailing infinito")
+                logger.info(f"PAPER TP2 alcanzado #{trade['trade_id']}, modo trailing")
 
+    # Cerrar trades con el df_actual para los gráficos
     for trade, precio_salida, motivo in trades_a_cerrar:
-        cerrar_posicion_paper(trade, precio_salida, motivo)
+        # Llamamos a cerrar pasando el df actual para el gráfico
+        cerrar_posicion_paper_con_df(trade, precio_salida, motivo, df_actual, noticia_titulo, sent_label, sent_score)
+
+def cerrar_posicion_paper_con_df(trade, precio_salida, motivo, df_actual, noticia_titulo, sent_label, sent_score):
+    global PAPER_BALANCE, PAPER_POSITIONS, PAPER_TOTAL_PNL, PAPER_WIN, PAPER_LOSS, PAPER_COUNTER_RESUMEN
+
+    side = trade['side']
+    qty = trade['qty']
+    entry = trade['entry_price']
+    comision_salida = qty * precio_salida * COMISION_TAKER
+
+    if side == 'Buy':
+        pnl_bruto = (precio_salida - entry) * qty
+    else:
+        pnl_bruto = (entry - precio_salida) * qty
+
+    pnl_neto = pnl_bruto - comision_salida - trade['comision_pagada']
+    PAPER_BALANCE += qty * precio_salida
+    PAPER_BALANCE += pnl_neto
+
+    trade['pnl_realizado'] = pnl_neto
+    PAPER_TOTAL_PNL += pnl_neto
+
+    if pnl_neto > 0:
+        PAPER_WIN += 1
+    else:
+        PAPER_LOSS += 1
+    PAPER_COUNTER_RESUMEN += 1
+
+    # --- MENSAJE DE CIERRE ---
+    mensaje = (f"🔒 PAPER CIERRE #{trade['trade_id']} - {motivo}\n"
+               f"💰 Entrada: {entry:.2f} | Salida: {precio_salida:.2f}\n"
+               f"📊 PnL Neto: {pnl_neto:.4f} USD\n"
+               f"💵 Balance actual: {PAPER_BALANCE:.2f} USD")
+    logger.info(mensaje)
+    telegram_mensaje(mensaje)
+
+    # --- GRÁFICO DE CIERRE ---
+    if df_actual is not None and not df_actual.empty:
+        fig = generar_grafico_trade(
+            df=df_actual,
+            decision=trade['decision'],
+            soporte=trade['soporte'],
+            resistencia=trade['resistencia'],
+            razones=trade['razones'],
+            estado=trade['estado_entrada'],
+            precio_entrada=entry,
+            precio_salida=precio_salida,
+            tiempo_entrada=trade['timestamp'],
+            trade_id=trade['trade_id'],
+            motivo_cierre=motivo,
+            noticia_titulo=noticia_titulo,
+            sent_label=sent_label,
+            sent_score=sent_score
+        )
+        if fig:
+            telegram_grafico(fig)
+            plt.close(fig)
+
+    # Eliminar de posiciones
+    PAPER_POSITIONS = [p for p in PAPER_POSITIONS if p['trade_id'] != trade['trade_id']]
+
+    # Resumen cada 5 trades
+    if PAPER_COUNTER_RESUMEN >= 5:
+        total_trades = PAPER_WIN + PAPER_LOSS
+        win_rate = (PAPER_WIN / total_trades * 100) if total_trades > 0 else 0
+        msg_resumen = (f"📊 RESUMEN PAPER (últimos {PAPER_COUNTER_RESUMEN} trades)\n"
+                       f"----------------------------------------\n"
+                       f"💰 PnL Total Neto: {PAPER_TOTAL_PNL:.4f} USD\n"
+                       f"🏆 Trades ganados: {PAPER_WIN}\n"
+                       f"❌ Trades perdidos: {PAPER_LOSS}\n"
+                       f"🎯 Win Rate: {win_rate:.1f}%\n"
+                       f"💵 Balance actual: {PAPER_BALANCE:.2f} USD")
+        telegram_mensaje(msg_resumen)
+        logger.info(msg_resumen)
+        PAPER_COUNTER_RESUMEN = 0
 
 # ============================================================
-# LOOP PRINCIPAL PAPER
+# LOOP PRINCIPAL PAPER CON TELEGRAM
 # ============================================================
 def run_paper_bot():
-    global PAPER_BALANCE, PAPER_POSITIONS, BLOQUEOS
+    global PAPER_BALANCE, BLOQUEOS
 
-    logger.info("="*60)
-    logger.info("🤖 PAPER TRADING V92.1 INICIADO")
-    logger.info(f"💰 Saldo inicial: {PAPER_BALANCE:.2f} USD")
-    logger.info(f"⚡ Leverage simulado: {LEVERAGE}x")
-    logger.info(f"📊 Intervalo: {INTERVAL}m | Máx posiciones: {MAX_OPEN_TRADES}")
-    logger.info(f"🔒 SL=1.5 ATR, R/R mínimo={MIN_RR_RATIO}, trailing=0.7 ATR")
-    logger.info("="*60)
+    # --- MENSAJE DE INICIO ---
+    msg_inicio = (f"🤖 PAPER BOT V92.2 INICIADO (simulación con Telegram)\n"
+                  f"💰 Saldo inicial: {PAPER_BALANCE:.2f} USD\n"
+                  f"⚡ Leverage simulado: {LEVERAGE}x\n"
+                  f"📊 Intervalo: {INTERVAL}m | Máx posiciones: {MAX_OPEN_TRADES}\n"
+                  f"🔒 SL=1.5 ATR, R/R mínimo={MIN_RR_RATIO}, trailing=0.7 ATR\n"
+                  f"📈 Estrategia: Zonas S/R, Rupturas prioritarias")
+    logger.info(msg_inicio)
+    telegram_mensaje(msg_inicio)
 
     ultima_fecha = None
 
@@ -1052,7 +1316,7 @@ def run_paper_bot():
                     BLOQUEOS["Fundamental"] += 1
                     decision = None
 
-            # Registrar bloqueos para diagnóstico
+            # Registrar bloqueos
             if decision is None and razones:
                 for r in razones:
                     if "R/R" in r:
@@ -1084,7 +1348,7 @@ def run_paper_bot():
             logger.info("="*80)
 
             if decision and num_abiertas < MAX_OPEN_TRADES:
-                trade = abrir_posicion_paper(
+                abrir_posicion_paper(
                     decision=decision,
                     precio=estado['precio'],
                     atr=estado['atr'],
@@ -1099,23 +1363,14 @@ def run_paper_bot():
                     sent_label=sent_label,
                     sent_score=sent_score
                 )
-                if trade:
-                    # Guardar ATR para trailing
-                    trade['atr'] = estado['atr']
 
             revisar_posiciones_paper(estado['precio'], df, titulo, fuente, sent_label, sent_score)
-
-            # Mostrar estadísticas de bloqueos cada 30 ciclos
-            if (int(time.time()) // (SLEEP_SECONDS * 30)) % 1 == 0:
-                logger.info("📊 BLOQUEOS ACUMULADOS:")
-                for k, v in BLOQUEOS.items():
-                    if v > 0:
-                        logger.info(f"   {k}: {v}")
 
             time.sleep(SLEEP_SECONDS)
 
         except Exception as e:
             logger.error(f"🚨 ERROR: {e}", exc_info=True)
+            telegram_mensaje(f"🚨 ERROR PAPER BOT: {e}")
             time.sleep(60)
 
 if __name__ == '__main__':
