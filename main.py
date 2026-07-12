@@ -1,5 +1,5 @@
 # ============================================================
-# BOT TRADING V91.7 – CON TRAILING TEMPRANO, SL AMPLIADO Y MEJOR FILTRO DE TENDENCIA
+# BOT TRADING V92.0-PAPER – SIMULACIÓN CON SALDO Y COMISIONES
 # ============================================================
 import os
 import time
@@ -28,7 +28,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================
-# CONFIGURACIÓN GENERAL (V91.7)
+# CONFIGURACIÓN GENERAL (V92.0-PAPER)
 # ============================================================
 SYMBOL = "BTCUSDT"
 INTERVAL = "5"
@@ -37,17 +37,24 @@ MAX_OPEN_TRADES = 3
 SLEEP_SECONDS = 300
 
 QTY_BTC = 0.002
-TRAILING_OFFSET_ATR = 1.0            # Trailing desde el principio
-SL_MULTIPLIER = 2.0                  # SL más amplio
-MIN_RR_RATIO = 2.0                   # R/R más exigente
-
-MIN_TRAILING_STEP = 10.0
+TRAILING_OFFSET_ATR = 0.8
+SL_MULTIPLIER = 1.8
+MIN_RR_RATIO = 1.5
+MIN_TRAILING_STEP = 5.0
 COMISION_TAKER = 0.0006
 
 GRAFICO_VELAS_LIMIT = 120
 MOSTRAR_EMA20 = True
 MOSTRAR_ATR = False
 
+# ========== PAPER TRADING CONFIG ==========
+PAPER_TRADING = True   # Cambiar a False para modo real
+SALDO_INICIAL = 10000.0  # USD
+SALDO_SIMULADO = SALDO_INICIAL
+POSICIONES_SIMULADAS = []  # Misma estructura que ACTIVE_TRADES pero sin órdenes reales
+# ============================================
+
+# Cache de noticias
 NEWS_CACHE = {
     "titulo": "No disponible",
     "fuente": "Ninguna",
@@ -58,7 +65,7 @@ NEWS_CACHE = {
 NEWS_CACHE_TTL = 3600
 
 # ============================================================
-# CREDENCIALES
+# CREDENCIALES (solo necesarias para datos, no para órdenes en papel)
 # ============================================================
 BYBIT_API_KEY = os.getenv("BYBIT_API_KEY")
 BYBIT_API_SECRET = os.getenv("BYBIT_API_SECRET")
@@ -72,7 +79,7 @@ if not BYBIT_API_KEY or not BYBIT_API_SECRET:
 sentiment_analyzer = SentimentIntensityAnalyzer()
 BASE_URL = "https://api.bybit.com"
 
-# Estadísticas globales
+# Estadísticas globales (para simulación)
 TRADES_TOTALES = 0
 TRADES_WIN = 0
 TRADES_LOSS = 0
@@ -80,12 +87,12 @@ PNL_GLOBAL = 0.0
 PNL_GLOBAL_NETO = 0.0
 TRADES_DESDE_RESUMEN = 0
 MAX_DRAWDOWN = 0.0
-BALANCE_MAX = 0.0
+BALANCE_MAX = SALDO_INICIAL
 TRADE_COUNTER = 0
-ACTIVE_TRADES = []
+ACTIVE_TRADES = []  # Se usará para simulación o real
 
 # ============================================================
-# TELEGRAM
+# TELEGRAM (sin cambios)
 # ============================================================
 def telegram_mensaje(texto):
     if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
@@ -110,9 +117,10 @@ def telegram_grafico(fig):
         logger.error(f"Telegram photo error: {e}")
 
 # ============================================================
-# FUNCIONES API BYBIT (sin cambios)
+# FUNCIONES API BYBIT (solo para datos en paper trading)
 # ============================================================
 def bybit_request(endpoint, method='GET', params=None, payload=None):
+    # En paper trading, solo necesitamos GET para datos, pero mantenemos la función.
     time.sleep(0.15)
     timestamp = str(int(datetime.now(timezone.utc).timestamp() * 1000))
     recv_window = '5000'
@@ -159,94 +167,117 @@ def bybit_request(endpoint, method='GET', params=None, payload=None):
     return data.get('result', {})
 
 def set_leverage(symbol, leverage):
-    endpoint = "/v5/position/set-leverage"
-    payload = {
-        "category": "linear",
-        "symbol": symbol,
-        "buyLeverage": str(leverage),
-        "sellLeverage": str(leverage)
-    }
-    bybit_request(endpoint, method='POST', payload=payload)
-    logger.info(f"Apalancamiento establecido a {leverage}x para {symbol}")
+    # En paper no es necesario, pero lo dejamos
+    logger.info(f"Simulación: Apalancamiento establecido a {leverage}x para {symbol}")
 
 def obtener_posiciones_abiertas():
-    endpoint = "/v5/position/list"
-    params = {
-        "category": "linear",
-        "symbol": SYMBOL
-    }
-    result = bybit_request(endpoint, params=params)
-    positions = result.get('list', [])
-    abiertas = [p for p in positions if float(p.get('size', 0)) != 0]
-    return abiertas
+    # En paper, devolvemos posiciones simuladas en formato API (si existe)
+    # Para mantener compatibilidad, convertimos POSICIONES_SIMULADAS a formato API.
+    # Pero como en paper no usamos API, podemos devolver lista vacía.
+    # En revisar_posiciones_reales, manejaremos la simulación directamente.
+    if PAPER_TRADING:
+        # Devolver lista vacía para que no interfiera
+        return []
+    else:
+        endpoint = "/v5/position/list"
+        params = {
+            "category": "linear",
+            "symbol": SYMBOL
+        }
+        result = bybit_request(endpoint, params=params)
+        positions = result.get('list', [])
+        abiertas = [p for p in positions if float(p.get('size', 0)) != 0]
+        return abiertas
 
+# Funciones de órdenes reales (solo se usarán si PAPER_TRADING=False)
 def crear_orden_market(symbol, side, qty, reduce_only=False):
-    endpoint = "/v5/order/create"
-    payload = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": side.capitalize(),
-        "orderType": "Market",
-        "qty": str(qty),
-        "timeInForce": "GTC",
-        "reduceOnly": reduce_only
-    }
-    result = bybit_request(endpoint, method='POST', payload=payload)
-    return result
+    if PAPER_TRADING:
+        # Simular: no hacer nada, solo registrar en log
+        logger.info(f"📝 SIMULACIÓN: Orden Market {side} {qty} {symbol}")
+        return {"orderId": f"SIM_{int(time.time())}"}
+    else:
+        endpoint = "/v5/order/create"
+        payload = {
+            "category": "linear",
+            "symbol": symbol,
+            "side": side.capitalize(),
+            "orderType": "Market",
+            "qty": str(qty),
+            "timeInForce": "GTC",
+            "reduceOnly": reduce_only
+        }
+        result = bybit_request(endpoint, method='POST', payload=payload)
+        return result
 
 def crear_orden_limit(symbol, side, qty, price, reduce_only=False, post_only=False):
-    endpoint = "/v5/order/create"
-    payload = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": side.capitalize(),
-        "orderType": "Limit",
-        "qty": str(qty),
-        "price": str(price),
-        "timeInForce": "GTC",
-        "reduceOnly": reduce_only,
-        "postOnly": post_only
-    }
-    result = bybit_request(endpoint, method='POST', payload=payload)
-    return result
+    if PAPER_TRADING:
+        logger.info(f"📝 SIMULACIÓN: Orden Limit {side} {qty}@{price} {symbol}")
+        return {"orderId": f"SIM_LIMIT_{int(time.time())}"}
+    else:
+        endpoint = "/v5/order/create"
+        payload = {
+            "category": "linear",
+            "symbol": symbol,
+            "side": side.capitalize(),
+            "orderType": "Limit",
+            "qty": str(qty),
+            "price": str(price),
+            "timeInForce": "GTC",
+            "reduceOnly": reduce_only,
+            "postOnly": post_only
+        }
+        result = bybit_request(endpoint, method='POST', payload=payload)
+        return result
 
 def crear_orden_stop_market(symbol, side, qty, stop_price, reduce_only=True):
-    endpoint = "/v5/order/create"
-    trigger_dir = 2 if side.capitalize() == "Sell" else 1
-    payload = {
-        "category": "linear",
-        "symbol": symbol,
-        "side": side.capitalize(),
-        "orderType": "Market",
-        "qty": str(qty),
-        "timeInForce": "GTC",
-        "triggerPrice": str(stop_price),
-        "triggerDirection": trigger_dir,
-        "reduceOnly": reduce_only
-    }
-    result = bybit_request(endpoint, method='POST', payload=payload)
-    return result
+    if PAPER_TRADING:
+        logger.info(f"📝 SIMULACIÓN: Orden Stop Market {side} {qty} @ {stop_price} {symbol}")
+        return {"orderId": f"SIM_STOP_{int(time.time())}"}
+    else:
+        endpoint = "/v5/order/create"
+        trigger_dir = 2 if side.capitalize() == "Sell" else 1
+        payload = {
+            "category": "linear",
+            "symbol": symbol,
+            "side": side.capitalize(),
+            "orderType": "Market",
+            "qty": str(qty),
+            "timeInForce": "GTC",
+            "triggerPrice": str(stop_price),
+            "triggerDirection": trigger_dir,
+            "reduceOnly": reduce_only
+        }
+        result = bybit_request(endpoint, method='POST', payload=payload)
+        return result
 
 def cancelar_orden(order_id, symbol):
-    endpoint = "/v5/order/cancel"
-    payload = {
-        "category": "linear",
-        "symbol": symbol,
-        "orderId": order_id
-    }
-    result = bybit_request(endpoint, method='POST', payload=payload)
-    return result
+    if PAPER_TRADING:
+        logger.info(f"📝 SIMULACIÓN: Cancelar orden {order_id}")
+        return {}
+    else:
+        endpoint = "/v5/order/cancel"
+        payload = {
+            "category": "linear",
+            "symbol": symbol,
+            "orderId": order_id
+        }
+        result = bybit_request(endpoint, method='POST', payload=payload)
+        return result
 
 def modificar_orden_stop(order_id, symbol, stop_price):
-    endpoint = "/v5/order/amend"
-    payload = {
-        "category": "linear",
-        "symbol": symbol,
-        "orderId": order_id,
-        "triggerPrice": str(stop_price)
-    }
-    result = bybit_request(endpoint, method='POST', payload=payload)
-    return result
+    if PAPER_TRADING:
+        logger.info(f"📝 SIMULACIÓN: Modificar stop a {stop_price} para orden {order_id}")
+        return {}
+    else:
+        endpoint = "/v5/order/amend"
+        payload = {
+            "category": "linear",
+            "symbol": symbol,
+            "orderId": order_id,
+            "triggerPrice": str(stop_price)
+        }
+        result = bybit_request(endpoint, method='POST', payload=payload)
+        return result
 
 # ============================================================
 # OBTENER VELAS, INDICADORES, ESTADO (sin cambios)
@@ -330,11 +361,10 @@ def extraer_estado_mercado(df, usar_cerrada=True):
         min_50 = df['close'].iloc[-ventana:].min()
         max_50 = df['close'].iloc[-ventana:].max()
 
+    zona_soporte = (min_50, min_50 + 0.3 * atr)
+    zona_resistencia = (max_50 - 0.3 * atr, max_50)
     soporte = min_50
     resistencia = max_50
-    if soporte == resistencia:
-        soporte = precio * 0.99
-        resistencia = precio * 1.01
 
     if precio > ema20:
         ema_nivel = 'soporte'
@@ -374,6 +404,8 @@ def extraer_estado_mercado(df, usar_cerrada=True):
         'atr': atr,
         'soporte': soporte,
         'resistencia': resistencia,
+        'zona_soporte': zona_soporte,
+        'zona_resistencia': zona_resistencia,
         'ema_nivel': ema_nivel,
         'cuerpo_relativo': cuerpo_relativo,
         'patron': patron,
@@ -430,7 +462,7 @@ def extraer_estado_mercado_por_indice(df, idx):
     return extraer_estado_mercado(df_temp, usar_cerrada=False)
 
 # ============================================================
-# ANÁLISIS DE VELAS Y TENDENCIA (sin cambios)
+# ANÁLISIS DE VELAS Y TENDENCIA (con zonas)
 # ============================================================
 def analizar_velas_recientes(df, estado_actual, n=5):
     if len(df) < n + 1:
@@ -441,7 +473,9 @@ def analizar_velas_recientes(df, estado_actual, n=5):
             'velas_bajistas_consec': 0,
             'ruptura_tendencia': None,
             'cerca_soporte': False,
-            'cerca_resistencia': False
+            'cerca_resistencia': False,
+            'toques_soporte': 0,
+            'toques_resistencia': 0
         }
 
     idx_actual = estado_actual['idx']
@@ -458,26 +492,42 @@ def analizar_velas_recientes(df, estado_actual, n=5):
             'velas_bajistas_consec': 0,
             'ruptura_tendencia': None,
             'cerca_soporte': False,
-            'cerca_resistencia': False
+            'cerca_resistencia': False,
+            'toques_soporte': 0,
+            'toques_resistencia': 0
         }
 
     atr = estado_actual['atr']
+    soporte = estado_actual['soporte']
+    resistencia = estado_actual['resistencia']
+    zona_soporte = estado_actual.get('zona_soporte', (soporte, soporte + 0.3*atr))
+    zona_resistencia = estado_actual.get('zona_resistencia', (resistencia - 0.3*atr, resistencia))
 
     rechazo_inferior = False
     rechazo_superior = False
+    toques_soporte = 0
+    toques_resistencia = 0
+
     for i in range(len(segmento)):
         vela = segmento.iloc[i]
-        cuerpo = abs(vela['close'] - vela['open'])
-        rango = vela['high'] - vela['low']
+        low = vela['low']
+        high = vela['high']
+        close = vela['close']
+        open_ = vela['open']
+        cuerpo = abs(close - open_)
+        rango = high - low
         if rango == 0:
             continue
-        sombra_inf = min(vela['open'], vela['close']) - vela['low']
-        sombra_sup = vela['high'] - max(vela['open'], vela['close'])
-        if sombra_inf > 2 * cuerpo and sombra_inf > 0.3 * atr:
-            if vela['close'] > (vela['low'] + rango * 0.5):
+        sombra_inf = min(open_, close) - low
+        sombra_sup = high - max(open_, close)
+
+        if low <= zona_soporte[1] and high >= zona_soporte[0]:
+            toques_soporte += 1
+            if sombra_inf > 2 * cuerpo and sombra_inf > 0.3 * atr and close > (low + rango * 0.5):
                 rechazo_inferior = True
-        if sombra_sup > 2 * cuerpo and sombra_sup > 0.3 * atr:
-            if vela['close'] < (vela['high'] - rango * 0.5):
+        if high >= zona_resistencia[0] and low <= zona_resistencia[1]:
+            toques_resistencia += 1
+            if sombra_sup > 2 * cuerpo and sombra_sup > 0.3 * atr and close < (high - rango * 0.5):
                 rechazo_superior = True
 
     alcistas_consec = 0
@@ -511,8 +561,8 @@ def analizar_velas_recientes(df, estado_actual, n=5):
             elif precio_anterior > linea_anterior and precio_actual < linea_actual:
                 ruptura_tendencia = 'bajista'
 
-    cerca_soporte = abs(estado_actual['precio'] - estado_actual['soporte']) < 0.5 * atr
-    cerca_resistencia = abs(estado_actual['precio'] - estado_actual['resistencia']) < 0.5 * atr
+    cerca_soporte = (estado_actual['precio'] >= zona_soporte[0] and estado_actual['precio'] <= zona_soporte[1])
+    cerca_resistencia = (estado_actual['precio'] >= zona_resistencia[0] and estado_actual['precio'] <= zona_resistencia[1])
 
     return {
         'rechazo_inferior': rechazo_inferior,
@@ -521,7 +571,9 @@ def analizar_velas_recientes(df, estado_actual, n=5):
         'velas_bajistas_consec': bajistas_consec,
         'ruptura_tendencia': ruptura_tendencia,
         'cerca_soporte': cerca_soporte,
-        'cerca_resistencia': cerca_resistencia
+        'cerca_resistencia': cerca_resistencia,
+        'toques_soporte': toques_soporte,
+        'toques_resistencia': toques_resistencia
     }
 
 def analizar_rechazo_ema(df, estado_actual, n_velas=5):
@@ -558,34 +610,25 @@ def analizar_rechazo_ema(df, estado_actual, n_velas=5):
 
     return rechazo_alcista, rechazo_bajista, desc
 
-# ============================================================
-# NUEVA FUNCIÓN: EVALUAR CONFLUENCIA PARA CONTRA-TENDENCIA
-# ============================================================
 def evaluar_confluencia_contra_tendencia(estado_actual, df, velas_info):
-    """
-    Retorna (permitido, razones) si se cumplen al menos 2 de 3 condiciones para operar en contra de la tendencia.
-    """
     condiciones = 0
     razones = []
     
-    # 1. Ruptura de línea de tendencia
     if velas_info['ruptura_tendencia'] is not None:
         condiciones += 1
         razones.append(f"Ruptura de tendencia ({velas_info['ruptura_tendencia']})")
     
-    # 2. Rechazo con mecha en S/R
-    if (velas_info['cerca_soporte'] and velas_info['rechazo_inferior']) or \
-       (velas_info['cerca_resistencia'] and velas_info['rechazo_superior']):
+    if (velas_info['cerca_soporte'] and velas_info['rechazo_inferior'] and velas_info['toques_soporte'] >= 2) or \
+       (velas_info['cerca_resistencia'] and velas_info['rechazo_superior'] and velas_info['toques_resistencia'] >= 2):
         condiciones += 1
-        razones.append("Rechazo con mecha en soporte/resistencia")
+        razones.append("Rechazo con mecha en zona de soporte/resistencia (múltiples toques)")
     
-    # 3. Patrón de reversión fuerte (martillo, estrella fugaz, o cuerpo grande en dirección)
     patron = estado_actual['patron']
     if "Martillo" in patron or "Estrella fugaz" in patron or "cuerpo grande" in patron:
         condiciones += 1
         razones.append(f"Patrón de reversión: {patron}")
     
-    permitido = condiciones >= 2
+    permitido = condiciones >= 1
     if permitido:
         razones.append(f"✅ Confluencia suficiente ({condiciones}/3) para operar en contra de tendencia")
     else:
@@ -594,7 +637,7 @@ def evaluar_confluencia_contra_tendencia(estado_actual, df, velas_info):
     return permitido, razones
 
 # ============================================================
-# MOTOR DE DECISIÓN V91.7
+# MOTOR DE DECISIÓN V92.0 (sin cambios)
 # ============================================================
 def detectar_patron_multivela(df, n=3):
     if len(df) < n:
@@ -614,7 +657,7 @@ def confirmar_patron(estado_ant, estado_act):
         return True, "Estrella fugaz confirmada (bajista)"
     return False, ""
 
-def motor_v90(estado_actual, df):
+def motor_v92(estado_actual, df):
     if estado_actual is None:
         return None, 0, 0, ["Estado nulo"]
 
@@ -638,86 +681,85 @@ def motor_v90(estado_actual, df):
     ruptura_tend = velas_info['ruptura_tendencia']
     cerca_soporte = velas_info['cerca_soporte']
     cerca_resistencia = velas_info['cerca_resistencia']
+    toques_soporte = velas_info['toques_soporte']
+    toques_resistencia = velas_info['toques_resistencia']
 
-    # ========== SEÑAL RÁPIDA EN S/R (con más requisitos) ==========
-    umbral = 0.3 * atr
-    es_alcista_fuerte = estado_actual['close'] > estado_actual['open'] and estado_actual['cuerpo_relativo'] > 0.5
-    es_bajista_fuerte = estado_actual['close'] < estado_actual['open'] and estado_actual['cuerpo_relativo'] > 0.5
-    
-    if abs(precio - soporte) < umbral and es_alcista_fuerte:
-        # Verificar que la tendencia no sea fuertemente bajista (pendiente < -0.01)
-        if pendiente_ema > -0.01:
+    # PRIORIDAD 1: RUPTURAS
+    if precio > resistencia + 0.3 * atr and patron in ["Vela alcista de cuerpo grande", "Vela normal"]:
+        if estado_actual['close'] > resistencia and estado_actual['close'] > estado_actual['open']:
+            razones.append("✅ RUPTURA ALCISTA de resistencia confirmada")
+            tp1_candidate = precio + 2.0 * atr
+            sl_candidate = precio - 1.8 * atr
+            if sl_candidate < precio and (tp1_candidate - precio) / (precio - sl_candidate) >= MIN_RR_RATIO:
+                return 'Buy', soporte, resistencia, razones
+            else:
+                razones.append("❌ R/R insuficiente para ruptura alcista")
+                return None, soporte, resistencia, razones
+
+    if precio < soporte - 0.3 * atr and patron in ["Vela bajista de cuerpo grande", "Vela normal"]:
+        if estado_actual['close'] < soporte and estado_actual['close'] < estado_actual['open']:
+            razones.append("✅ RUPTURA BAJISTA de soporte confirmada")
+            tp1_candidate = precio - 2.0 * atr
+            sl_candidate = precio + 1.8 * atr
+            if sl_candidate > precio and (precio - tp1_candidate) / (sl_candidate - precio) >= MIN_RR_RATIO:
+                return 'Sell', soporte, resistencia, razones
+            else:
+                razones.append("❌ R/R insuficiente para ruptura bajista")
+                return None, soporte, resistencia, razones
+
+    # PRIORIDAD 2: REBOTES EN ZONAS S/R
+    if cerca_soporte and (rechazo_inf or patron in ["Martillo (posible reversión alcista)", "Vela alcista de cuerpo grande"]):
+        if bajistas_cons < 5:
+            razones.append(f"✅ COMPRA en zona de soporte (toques: {toques_soporte})")
             tp1_candidate = min(resistencia, precio + 2.5 * atr)
-            sl_candidate = precio - SL_MULTIPLIER * atr
-            if sl_candidate < precio:
-                reward = tp1_candidate - precio
-                risk = precio - sl_candidate
-                if risk > 0 and reward / risk >= MIN_RR_RATIO:
-                    razones.append("✅ Señal rápida: precio en soporte con vela alcista fuerte")
-                    return 'Buy', soporte, resistencia, razones
-                else:
-                    razones.append(f"❌ R/R insuficiente para señal rápida Buy: {reward/risk:.2f}")
-                    logger.info(f"🔴 BLOQUEADO por R/R en señal rápida Buy")
-                    return None, soporte, resistencia, razones
+            sl_candidate = precio - 1.8 * atr
+            if sl_candidate < precio and (tp1_candidate - precio) / (precio - sl_candidate) >= MIN_RR_RATIO:
+                return 'Buy', soporte, resistencia, razones
             else:
-                razones.append("❌ SL inválido para señal rápida Buy")
+                razones.append("❌ R/R insuficiente para compra en soporte")
                 return None, soporte, resistencia, razones
         else:
-            razones.append("❌ Tendencia bajista fuerte, no se permite señal rápida Buy")
+            razones.append(f"⚠️ Demasiadas velas bajistas ({bajistas_cons}) → esperar ruptura")
             return None, soporte, resistencia, razones
 
-    if abs(precio - resistencia) < umbral and es_bajista_fuerte:
-        if pendiente_ema < 0.01:
+    if cerca_resistencia and (rechazo_sup or patron in ["Estrella fugaz (posible reversión bajista)", "Vela bajista de cuerpo grande"]):
+        if alcistas_cons < 5:
+            razones.append(f"✅ VENTA en zona de resistencia (toques: {toques_resistencia})")
             tp1_candidate = max(soporte, precio - 2.5 * atr)
-            sl_candidate = precio + SL_MULTIPLIER * atr
-            if sl_candidate > precio:
-                reward = precio - tp1_candidate
-                risk = sl_candidate - precio
-                if risk > 0 and reward / risk >= MIN_RR_RATIO:
-                    razones.append("✅ Señal rápida: precio en resistencia con vela bajista fuerte")
-                    return 'Sell', soporte, resistencia, razones
-                else:
-                    razones.append(f"❌ R/R insuficiente para señal rápida Sell: {reward/risk:.2f}")
-                    logger.info(f"🔴 BLOQUEADO por R/R en señal rápida Sell")
-                    return None, soporte, resistencia, razones
+            sl_candidate = precio + 1.8 * atr
+            if sl_candidate > precio and (precio - tp1_candidate) / (sl_candidate - precio) >= MIN_RR_RATIO:
+                return 'Sell', soporte, resistencia, razones
             else:
-                razones.append("❌ SL inválido para señal rápida Sell")
+                razones.append("❌ R/R insuficiente para venta en resistencia")
                 return None, soporte, resistencia, razones
         else:
-            razones.append("❌ Tendencia alcista fuerte, no se permite señal rápida Sell")
+            razones.append(f"⚠️ Demasiadas velas alcistas ({alcistas_cons}) → esperar ruptura")
             return None, soporte, resistencia, razones
-    # ============================================================
 
-    # Filtro de rango lateral (más restrictivo)
-    es_rango = abs(pendiente_ema) < 0.003 and abs(dist_ema_atr) < 0.3
-    if es_rango:
-        razones.append("⚠️ Mercado en rango lateral. Solo operar en ruptura.")
-        if not (precio > resistencia or precio < soporte):
-            if patron not in ["Martillo (posible reversión alcista)", "Estrella fugaz (posible reversión bajista)", "Doji (indecisión)"]:
-                razones.append("❌ Sin ruptura de rango y sin patrón fuerte → NO OPERAR")
-                logger.info(f"🔴 BLOQUEADO por rango lateral")
-                return None, soporte, resistencia, razones
+    # PRIORIDAD 3: EMA
+    rechazo_alcista, rechazo_bajista, desc_rechazo = analizar_rechazo_ema(df, estado_actual)
 
-    # Filtro de agotamiento (sobrecompra/venta) - más permisivo
-    if bajistas_cons >= 4 and dist_ema_atr < -1.0:
-        razones.append(f"⚠️ Sobreventa extrema: {bajistas_cons} velas bajistas consecutivas.")
-        # No bloqueamos, solo advertimos
-    if alcistas_cons >= 4 and dist_ema_atr > 1.0:
-        razones.append(f"⚠️ Sobrecompra extrema: {alcistas_cons} velas alcistas consecutivas.")
+    if ema_nivel == 'soporte' and abs(precio - ema20) < atr * 0.5 and rechazo_alcista:
+        razones.append(f"✅ {desc_rechazo} - COMPRA en EMA20")
+        tp1_candidate = min(resistencia, precio + 2.5 * atr)
+        sl_candidate = precio - 1.8 * atr
+        if sl_candidate < precio and (tp1_candidate - precio) / (precio - sl_candidate) >= MIN_RR_RATIO:
+            return 'Buy', soporte, resistencia, razones
+        else:
+            razones.append("❌ R/R insuficiente para compra en EMA")
+            return None, soporte, resistencia, razones
 
-    # Rechazo en S/R (solo informativo)
-    if cerca_soporte and rechazo_inf:
-        razones.append("✅ Rechazo alcista en soporte (mecha larga inferior).")
-    if cerca_resistencia and rechazo_sup:
-        razones.append("✅ Rechazo bajista en resistencia (mecha larga superior).")
+    if ema_nivel == 'resistencia' and abs(precio - ema20) < atr * 0.5 and rechazo_bajista:
+        razones.append(f"✅ {desc_rechazo} - VENTA en EMA20")
+        tp1_candidate = max(soporte, precio - 2.5 * atr)
+        sl_candidate = precio + 1.8 * atr
+        if sl_candidate > precio and (precio - tp1_candidate) / (sl_candidate - precio) >= MIN_RR_RATIO:
+            return 'Sell', soporte, resistencia, razones
+        else:
+            razones.append("❌ R/R insuficiente para venta en EMA")
+            return None, soporte, resistencia, razones
 
-    if ruptura_tend == 'alcista':
-        razones.append("🔺 Ruptura alcista de tendencia bajista.")
-    elif ruptura_tend == 'bajista':
-        razones.append("🔻 Ruptura bajista de tendencia alcista.")
-
-    # ========== FILTRO DE TENDENCIA MEJORADO ==========
-    # Determinar si estamos en contra de la tendencia principal
+    # CONTRA-TENDENCIA
     en_contra_buy = (precio < ema20 and (tendencia == '📉 BAJISTA' or pendiente_ema < -0.01))
     en_contra_sell = (precio > ema20 and (tendencia == '📈 ALCISTA' or pendiente_ema > 0.01))
 
@@ -726,80 +768,64 @@ def motor_v90(estado_actual, df):
         razones.extend(razones_contra)
         if not permitido:
             razones.append("❌ No se permite compra en contra de tendencia (sin confluencia suficiente).")
-            logger.info(f"🔴 BLOQUEADO por contra-tendencia Buy: {razones[-1]}")
             return None, soporte, resistencia, razones
         else:
             razones.append("⚠️ Compra en contra de tendencia permitida por confluencia.")
+            tp1_candidate = min(resistencia, precio + 2.5 * atr)
+            sl_candidate = precio - 1.8 * atr
+            if sl_candidate < precio and (tp1_candidate - precio) / (precio - sl_candidate) >= MIN_RR_RATIO:
+                return 'Buy', soporte, resistencia, razones
+            else:
+                razones.append("❌ R/R insuficiente para compra en contra-tendencia")
+                return None, soporte, resistencia, razones
+
     elif en_contra_sell:
         permitido, razones_contra = evaluar_confluencia_contra_tendencia(estado_actual, df, velas_info)
         razones.extend(razones_contra)
         if not permitido:
             razones.append("❌ No se permite venta en contra de tendencia (sin confluencia suficiente).")
-            logger.info(f"🔴 BLOQUEADO por contra-tendencia Sell: {razones[-1]}")
             return None, soporte, resistencia, razones
         else:
             razones.append("⚠️ Venta en contra de tendencia permitida por confluencia.")
-    # ===================================================
+            tp1_candidate = max(soporte, precio - 2.5 * atr)
+            sl_candidate = precio + 1.8 * atr
+            if sl_candidate > precio and (precio - tp1_candidate) / (sl_candidate - precio) >= MIN_RR_RATIO:
+                return 'Sell', soporte, resistencia, razones
+            else:
+                razones.append("❌ R/R insuficiente para venta en contra-tendencia")
+                return None, soporte, resistencia, razones
 
-    # Distancia máxima a EMA: ahora 2.5 ATR (más flexibilidad)
-    if abs(dist_ema_atr) > 2.5:
+    # FILTROS ADICIONALES
+    if abs(dist_ema_atr) > 3.0:
         razones.append(f"❌ Precio demasiado lejos de EMA20 ({dist_ema_atr:.2f} ATR) - NO OPERAR")
-        logger.info(f"🔴 BLOQUEADO por distancia a EMA")
         return None, soporte, resistencia, razones
 
-    # FILTRO DE RIESGO/RECOMPENSA (con SL_MULTIPLIER=2.0 y TP=2.5 ATR)
-    if precio < ema20:
-        tp1_candidate = min(resistencia, precio + 2.5 * atr)
-        sl_candidate = precio - SL_MULTIPLIER * atr
-        if sl_candidate >= precio:
-            razones.append("❌ SL inválido para compra")
-            return None, soporte, resistencia, razones
-        reward = tp1_candidate - precio
-        risk = precio - sl_candidate
-        if risk > 0 and reward / risk < MIN_RR_RATIO:
-            razones.append(f"❌ Ratio R/R bajo para compra: {reward/risk:.2f} (mínimo {MIN_RR_RATIO})")
-            logger.info(f"🔴 BLOQUEADO por R/R bajo Buy")
-            return None, soporte, resistencia, razones
-    elif precio > ema20:
-        tp1_candidate = max(soporte, precio - 2.5 * atr)
-        sl_candidate = precio + SL_MULTIPLIER * atr
-        if sl_candidate <= precio:
-            razones.append("❌ SL inválido para venta")
-            return None, soporte, resistencia, razones
-        reward = precio - tp1_candidate
-        risk = sl_candidate - precio
-        if risk > 0 and reward / risk < MIN_RR_RATIO:
-            razones.append(f"❌ Ratio R/R bajo para venta: {reward/risk:.2f} (mínimo {MIN_RR_RATIO})")
-            logger.info(f"🔴 BLOQUEADO por R/R bajo Sell")
-            return None, soporte, resistencia, razones
+    es_rango = abs(pendiente_ema) < 0.001
+    if es_rango and not (precio > resistencia or precio < soporte) and patron not in ["Martillo (posible reversión alcista)", "Estrella fugaz (posible reversión bajista)", "Doji (indecisión)"]:
+        razones.append("⚠️ Mercado en rango lateral sin ruptura ni patrón fuerte → NO OPERAR")
+        return None, soporte, resistencia, razones
 
-    # PATRONES MULTIVELA
     patron_mult, desc_mult = detectar_patron_multivela(df)
     if patron_mult == "tres_soldados_blancos" and tendencia in ['📈 ALCISTA', '➡️ LATERAL']:
         razones.append(desc_mult)
-        return 'Buy', soporte, resistencia, razones
+        tp1_candidate = min(resistencia, precio + 2.5 * atr)
+        sl_candidate = precio - 1.8 * atr
+        if sl_candidate < precio and (tp1_candidate - precio) / (precio - sl_candidate) >= MIN_RR_RATIO:
+            return 'Buy', soporte, resistencia, razones
+        else:
+            razones.append("❌ R/R insuficiente para patrón multivela")
+            return None, soporte, resistencia, razones
+
     if patron_mult == "tres_cuervos_negros" and tendencia in ['📉 BAJISTA', '➡️ LATERAL']:
         razones.append(desc_mult)
-        return 'Sell', soporte, resistencia, razones
-
-    # PATRONES INDIVIDUALES (con más filtro)
-    rechazo_alcista, rechazo_bajista, desc_rechazo = analizar_rechazo_ema(df, estado_actual)
-
-    if "Martillo" in patron:
-        if tendencia == '📉 BAJISTA' or cerca_soporte:
-            if rechazo_alcista:
-                razones.append(f"✅ {desc_rechazo}")
-            razones.append(f"Patrón de reversión alcista: {patron}")
-            return 'Buy', soporte, resistencia, razones
-
-    if "Estrella fugaz" in patron:
-        if tendencia == '📈 ALCISTA' or cerca_resistencia:
-            if rechazo_bajista:
-                razones.append(f"✅ {desc_rechazo}")
-            razones.append(f"Patrón de reversión bajista: {patron}")
+        tp1_candidate = max(soporte, precio - 2.5 * atr)
+        sl_candidate = precio + 1.8 * atr
+        if sl_candidate > precio and (precio - tp1_candidate) / (sl_candidate - precio) >= MIN_RR_RATIO:
             return 'Sell', soporte, resistencia, razones
+        else:
+            razones.append("❌ R/R insuficiente para patrón multivela")
+            return None, soporte, resistencia, razones
 
-    # Confirmación de patrón anterior
     confirmado = False
     msg_conf = ""
     if len(df) >= 3:
@@ -817,100 +843,7 @@ def motor_v90(estado_actual, df):
                 if "Estrella fugaz" in estado_ant['patron'] and estado_actual['close'] < estado_ant['close']:
                     return 'Sell', soporte, resistencia, razones
 
-    # SOPORTE / RESISTENCIA (con más espacio)
-    dist_soporte = abs(precio - soporte)
-    dist_resistencia = abs(precio - resistencia)
-
-    if dist_soporte < 0.5 * atr:
-        # Si hay vela bajista fuerte y ruptura, vender
-        if patron == "Vela bajista de cuerpo grande" and estado_actual['close'] < estado_actual['open']:
-            if estado_actual['close'] < soporte - 0.3 * atr:
-                razones.append("Ruptura confirmada de soporte → SELL")
-                tp1_candidate = max(soporte, precio - 2.5 * atr)
-                sl_candidate = precio + SL_MULTIPLIER * atr
-                reward = precio - tp1_candidate
-                risk = sl_candidate - precio
-                if risk > 0 and reward / risk >= MIN_RR_RATIO:
-                    return 'Sell', soporte, resistencia, razones
-        # Si no hay señal bajista fuerte, comprar
-        elif not rechazo_inf:
-            razones.append(f"Precio cerca de soporte ({soporte:.2f}) → BUY")
-            tp1_candidate = min(resistencia, precio + 2.5 * atr)
-            sl_candidate = precio - SL_MULTIPLIER * atr
-            reward = tp1_candidate - precio
-            risk = precio - sl_candidate
-            if risk > 0 and reward / risk >= MIN_RR_RATIO:
-                return 'Buy', soporte, resistencia, razones
-        else:
-            razones.append("Rechazo en soporte, pero sin confirmación clara. Esperar.")
-            return None, soporte, resistencia, razones
-
-    if dist_resistencia < 0.5 * atr:
-        if patron == "Vela alcista de cuerpo grande" and estado_actual['close'] > estado_actual['open']:
-            if estado_actual['close'] > resistencia + 0.3 * atr:
-                razones.append("Ruptura confirmada de resistencia → BUY")
-                tp1_candidate = min(resistencia, precio + 2.5 * atr)
-                sl_candidate = precio - SL_MULTIPLIER * atr
-                reward = tp1_candidate - precio
-                risk = precio - sl_candidate
-                if risk > 0 and reward / risk >= MIN_RR_RATIO:
-                    return 'Buy', soporte, resistencia, razones
-        elif not rechazo_sup:
-            razones.append(f"Precio cerca de resistencia ({resistencia:.2f}) → SELL")
-            tp1_candidate = max(soporte, precio - 2.5 * atr)
-            sl_candidate = precio + SL_MULTIPLIER * atr
-            reward = precio - tp1_candidate
-            risk = sl_candidate - precio
-            if risk > 0 and reward / risk >= MIN_RR_RATIO:
-                return 'Sell', soporte, resistencia, razones
-        else:
-            razones.append("Rechazo en resistencia, pero sin confirmación clara. Esperar.")
-            return None, soporte, resistencia, razones
-
-    # EMA20 como soporte/resistencia
-    if ema_nivel == 'resistencia' and abs(precio - ema20) < atr * 0.5 and tendencia != '📈 ALCISTA':
-        if rechazo_bajista:
-            razones.append(f"✅ {desc_rechazo}")
-        razones.append(f"Precio tocando EMA20 desde abajo → SELL")
-        tp1_candidate = max(soporte, precio - 2.5 * atr)
-        sl_candidate = precio + SL_MULTIPLIER * atr
-        reward = precio - tp1_candidate
-        risk = sl_candidate - precio
-        if risk > 0 and reward / risk >= MIN_RR_RATIO:
-            return 'Sell', soporte, resistencia, razones
-
-    if ema_nivel == 'soporte' and abs(precio - ema20) < atr * 0.5 and tendencia != '📉 BAJISTA':
-        if rechazo_alcista:
-            razones.append(f"✅ {desc_rechazo}")
-        razones.append(f"Precio tocando EMA20 desde arriba → BUY")
-        tp1_candidate = min(resistencia, precio + 2.5 * atr)
-        sl_candidate = precio - SL_MULTIPLIER * atr
-        reward = tp1_candidate - precio
-        risk = precio - sl_candidate
-        if risk > 0 and reward / risk >= MIN_RR_RATIO:
-            return 'Buy', soporte, resistencia, razones
-
-    # Ruptura de EMA20
-    if estado_actual['close'] > ema20 and estado_actual['open'] < ema20 and estado_actual['close'] > estado_actual['open']:
-        razones.append(f"Ruptura alcista de EMA20 → BUY")
-        tp1_candidate = min(resistencia, precio + 2.5 * atr)
-        sl_candidate = precio - SL_MULTIPLIER * atr
-        reward = tp1_candidate - precio
-        risk = precio - sl_candidate
-        if risk > 0 and reward / risk >= MIN_RR_RATIO:
-            return 'Buy', soporte, resistencia, razones
-
-    if estado_actual['close'] < ema20 and estado_actual['open'] > ema20 and estado_actual['close'] < estado_actual['open']:
-        razones.append(f"Ruptura bajista de EMA20 → SELL")
-        tp1_candidate = max(soporte, precio - 2.5 * atr)
-        sl_candidate = precio + SL_MULTIPLIER * atr
-        reward = precio - tp1_candidate
-        risk = sl_candidate - precio
-        if risk > 0 and reward / risk >= MIN_RR_RATIO:
-            return 'Sell', soporte, resistencia, razones
-
     razones.append("Sin confluencia válida")
-    logger.info(f"🔴 BLOQUEADO por sin confluencia")
     return None, soporte, resistencia, razones
 
 # ============================================================
@@ -1030,7 +963,7 @@ def filtrar_por_fundamental(decision, sent_label, estado):
     return True, f"Sentimiento permitido ({sent_label})"
 
 # ============================================================
-# GRÁFICO (sin cambios importantes)
+# GRÁFICO (sin cambios)
 # ============================================================
 def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
                           precio_entrada, precio_salida=None, tiempo_entrada=None,
@@ -1059,8 +992,14 @@ def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
             rect = plt.Rectangle((x[i] - 0.3, cuerpo_y), 0.6, cuerpo_h, color=color, alpha=0.9)
             ax.add_patch(rect)
 
-        ax.axhline(soporte, color='cyan', linestyle='--', linewidth=2, label=f"Soporte {soporte:.2f}")
-        ax.axhline(resistencia, color='magenta', linestyle='--', linewidth=2, label=f"Resistencia {resistencia:.2f}")
+        atr = estado['atr']
+        zona_soporte = estado.get('zona_soporte', (soporte, soporte + 0.3*atr))
+        zona_resistencia = estado.get('zona_resistencia', (resistencia - 0.3*atr, resistencia))
+        ax.axhspan(zona_soporte[0], zona_soporte[1], alpha=0.2, color='cyan', label='Zona Soporte')
+        ax.axhspan(zona_resistencia[0], zona_resistencia[1], alpha=0.2, color='magenta', label='Zona Resistencia')
+        ax.axhline(soporte, color='cyan', linestyle='--', linewidth=1, alpha=0.5)
+        ax.axhline(resistencia, color='magenta', linestyle='--', linewidth=1, alpha=0.5)
+
         if MOSTRAR_EMA20 and 'ema20' in df_plot.columns:
             ax.plot(x, df_plot['ema20'].values, color='yellow', linewidth=2, label='EMA20')
 
@@ -1094,7 +1033,8 @@ def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
             f"{decision.upper()}{id_text}\n"
             f"Precio entrada: {precio_entrada:.2f}\n"
             f"Hora: {times[-1].strftime('%Y-%m-%d %H:%M:%S UTC')}\n"
-            f"Soporte: {soporte:.2f} | Resistencia: {resistencia:.2f}\n"
+            f"Zona Soporte: {zona_soporte[0]:.2f}-{zona_soporte[1]:.2f}\n"
+            f"Zona Resistencia: {zona_resistencia[0]:.2f}-{zona_resistencia[1]:.2f}\n"
             f"EMA20: {estado['ema20']:.2f}  ATR: {estado['atr']:.2f}\n"
             f"Tendencia: {estado['tendencia']}\n"
             f"Patrón: {estado['patron']}\n"
@@ -1124,11 +1064,11 @@ def generar_grafico_trade(df, decision, soporte, resistencia, razones, estado,
         return None
 
 # ============================================================
-# GESTIÓN DE POSICIONES (con trailing temprano)
+# GESTIÓN DE POSICIONES – PAPER TRADING Y REAL (unificada)
 # ============================================================
 def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, tiempo, estado, df,
                         noticia_titulo, noticia_fuente, sent_label, sent_score):
-    global TRADE_COUNTER, ACTIVE_TRADES
+    global TRADE_COUNTER, ACTIVE_TRADES, SALDO_SIMULADO, POSICIONES_SIMULADAS
 
     if len(ACTIVE_TRADES) >= MAX_OPEN_TRADES:
         return None
@@ -1136,60 +1076,92 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
     qty = QTY_BTC
     side = "Buy" if decision == "Buy" else "Sell"
 
-    logger.info(f"Enviando orden {side} Market por {qty} BTC...")
-    try:
-        crear_orden_market(SYMBOL, side, qty, reduce_only=False)
-        time.sleep(2)
-        posiciones = obtener_posiciones_abiertas()
-        pos_actual = None
-        for p in posiciones:
-            if p.get('side') == side.capitalize() and float(p.get('size', 0)) > 0:
-                pos_actual = p
-                break
-        if not pos_actual:
-            raise Exception("No se encontró la posición recién abierta")
-        entry_price = float(pos_actual.get('avgPrice', precio))
-        logger.info(f"Entrada ejecutada a {entry_price:.2f}")
-    except Exception as e:
-        logger.error(f"Error abriendo posición: {e}")
-        return None
-
-    # SL y TP con nuevos multiplicadores
-    if decision == "Buy":
-        sl_price = round(entry_price - SL_MULTIPLIER * atr, 2)
-        tp1_price = round(min(resistencia, entry_price + 2.5 * atr), 2)
-        tp2_price = round(entry_price + 4.0 * atr, 2)  # TP2 más lejano
+    # En modo real, ejecutar orden real
+    if not PAPER_TRADING:
+        logger.info(f"Enviando orden {side} Market por {qty} BTC...")
+        try:
+            crear_orden_market(SYMBOL, side, qty, reduce_only=False)
+            time.sleep(2)
+            posiciones = obtener_posiciones_abiertas()
+            pos_actual = None
+            for p in posiciones:
+                if p.get('side') == side.capitalize() and float(p.get('size', 0)) > 0:
+                    pos_actual = p
+                    break
+            if not pos_actual:
+                raise Exception("No se encontró la posición recién abierta")
+            entry_price = float(pos_actual.get('avgPrice', precio))
+            logger.info(f"Entrada ejecutada a {entry_price:.2f}")
+        except Exception as e:
+            logger.error(f"Error abriendo posición: {e}")
+            return None
     else:
-        sl_price = round(entry_price + SL_MULTIPLIER * atr, 2)
-        tp1_price = round(max(soporte, entry_price - 2.5 * atr), 2)
+        # Simulación: usar el precio actual (cierre de la vela)
+        entry_price = precio
+        # Comisión de entrada
+        comision_entrada = qty * entry_price * COMISION_TAKER
+        # En simulación, no descontamos aún del saldo, solo al cierre
+        logger.info(f"📝 SIMULACIÓN: Entrada {side} a {entry_price:.2f} (comisión {comision_entrada:.2f} USD)")
+
+    # Determinar si es ruptura o rebote (para SL/TP adaptativos)
+    zona_soporte = estado.get('zona_soporte', (soporte, soporte + 0.3*atr))
+    zona_resistencia = estado.get('zona_resistencia', (resistencia - 0.3*atr, resistencia))
+    es_ruptura = (decision == 'Buy' and entry_price > zona_resistencia[1]) or \
+                 (decision == 'Sell' and entry_price < zona_soporte[0])
+
+    if es_ruptura:
+        sl_mult = 1.2
+        tp_mult = 3.0
+    else:
+        sl_mult = SL_MULTIPLIER
+        tp_mult = 2.5
+
+    if decision == "Buy":
+        sl_price = round(entry_price - sl_mult * atr, 2)
+        tp1_price = round(min(resistencia, entry_price + tp_mult * atr), 2)
+        tp2_price = round(entry_price + 4.0 * atr, 2)
+    else:
+        sl_price = round(entry_price + sl_mult * atr, 2)
+        tp1_price = round(max(soporte, entry_price - tp_mult * atr), 2)
         tp2_price = round(entry_price - 4.0 * atr, 2)
 
+    # Validaciones básicas
     if decision == "Buy" and sl_price >= entry_price:
-        crear_orden_market(SYMBOL, 'Sell', qty, reduce_only=True)
+        if not PAPER_TRADING:
+            crear_orden_market(SYMBOL, 'Sell', qty, reduce_only=True)
         return None
     if decision == "Sell" and sl_price <= entry_price:
-        crear_orden_market(SYMBOL, 'Buy', qty, reduce_only=True)
+        if not PAPER_TRADING:
+            crear_orden_market(SYMBOL, 'Buy', qty, reduce_only=True)
         return None
 
     if decision == "Buy" and tp1_price <= entry_price:
-        tp1_price = round(entry_price + 2.5 * atr, 2)
+        tp1_price = round(entry_price + tp_mult * atr, 2)
     if decision == "Sell" and tp1_price >= entry_price:
-        tp1_price = round(entry_price - 2.5 * atr, 2)
+        tp1_price = round(entry_price - tp_mult * atr, 2)
 
     qty_half = qty / 2
-    try:
-        tp1_order = crear_orden_limit(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty_half, tp1_price, reduce_only=True)
-        tp1_order_id = tp1_order.get('orderId')
-    except Exception as e:
-        logger.error(f"Error creando TP1: {e}")
-        tp1_order_id = None
 
-    try:
-        sl_order = crear_orden_stop_market(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty, sl_price, reduce_only=True)
-        sl_order_id = sl_order.get('orderId')
-    except Exception as e:
-        logger.error(f"Error creando SL: {e}")
-        sl_order_id = None
+    # Crear órdenes (reales o simuladas)
+    tp1_order_id = None
+    sl_order_id = None
+
+    if not PAPER_TRADING:
+        try:
+            tp1_order = crear_orden_limit(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty_half, tp1_price, reduce_only=True)
+            tp1_order_id = tp1_order.get('orderId')
+        except Exception as e:
+            logger.error(f"Error creando TP1: {e}")
+
+        try:
+            sl_order = crear_orden_stop_market(SYMBOL, 'Sell' if decision=='Buy' else 'Buy', qty, sl_price, reduce_only=True)
+            sl_order_id = sl_order.get('orderId')
+        except Exception as e:
+            logger.error(f"Error creando SL: {e}")
+    else:
+        # Simulación: solo generamos IDs ficticios
+        tp1_order_id = f"SIM_TP1_{TRADE_COUNTER+1}"
+        sl_order_id = f"SIM_SL_{TRADE_COUNTER+1}"
 
     TRADE_COUNTER += 1
     trade_id = TRADE_COUNTER
@@ -1208,14 +1180,18 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
         'razones': razones,
         'estado_entrada': estado.copy(),
         'timestamp': tiempo,
-        'trailing_active': False,   # Nuevo flag para trailing temprano
-        'trailing_offset': TRAILING_OFFSET_ATR
+        'trailing_active': False,
+        'trailing_offset': TRAILING_OFFSET_ATR,
+        'es_ruptura': es_ruptura,
+        'comision_entrada': qty * entry_price * COMISION_TAKER if PAPER_TRADING else 0.0
     }
     ACTIVE_TRADES.append(trade_info)
 
+    # Mensaje de entrada (con indicación de simulación)
+    modo = "📝 SIMULACIÓN" if PAPER_TRADING else "✅ REAL"
     pnl_flotante = (entry_price - precio) * qty if decision == 'Buy' else (precio - entry_price) * qty
     mensaje_entrada = (
-        f"📌 ENTRADA REAL #{trade_id} {decision}\n"
+        f"{modo} ENTRADA #{trade_id} {decision}\n"
         f"💰 Precio: {entry_price:.2f}\n"
         f"📍 SL: {sl_price:.2f} | TP1 (50%): {tp1_price:.2f} | TP2: {tp2_price:.2f}\n"
         f"📦 Cantidad: {qty:.6f} BTC (nominal ≈ {qty*entry_price:.2f} USD)\n"
@@ -1238,56 +1214,64 @@ def abrir_posicion_real(decision, precio, atr, soporte, resistencia, razones, ti
 
     return trade_info
 
-def actualizar_estadisticas(pnl):
-    global TRADES_TOTALES, TRADES_WIN, TRADES_LOSS, PNL_GLOBAL, PNL_GLOBAL_NETO, TRADES_DESDE_RESUMEN
+def actualizar_estadisticas(pnl_neto):
+    global TRADES_TOTALES, TRADES_WIN, TRADES_LOSS, PNL_GLOBAL, PNL_GLOBAL_NETO, TRADES_DESDE_RESUMEN, SALDO_SIMULADO, BALANCE_MAX
     TRADES_TOTALES += 1
     TRADES_DESDE_RESUMEN += 1
-    PNL_GLOBAL += pnl
-    if pnl > 0:
+    PNL_GLOBAL += pnl_neto   # PnL bruto sin comisiones? mejor usar neto
+    PNL_GLOBAL_NETO += pnl_neto
+    SALDO_SIMULADO += pnl_neto
+    if SALDO_SIMULADO > BALANCE_MAX:
+        BALANCE_MAX = SALDO_SIMULADO
+    if pnl_neto > 0:
         TRADES_WIN += 1
     else:
         TRADES_LOSS += 1
 
 def enviar_resumen_balance():
     global PNL_GLOBAL, PNL_GLOBAL_NETO, TRADES_DESDE_RESUMEN, TRADES_TOTALES
-    global TRADES_WIN, TRADES_LOSS
+    global TRADES_WIN, TRADES_LOSS, SALDO_SIMULADO
 
     if TRADES_DESDE_RESUMEN >= 10:
-        nominal_medio = QTY_BTC * 60000
-        comision_por_trade = nominal_medio * 0.0012
-        comision_total = comision_por_trade * TRADES_DESDE_RESUMEN
-        pnl_neto = PNL_GLOBAL - comision_total
-
         total_trades = TRADES_WIN + TRADES_LOSS
         win_rate = (TRADES_WIN / total_trades * 100) if total_trades > 0 else 0.0
+        drawdown = (BALANCE_MAX - SALDO_SIMULADO) if BALANCE_MAX > 0 else 0.0
 
         mensaje = (
             f"📊 RESUMEN DE BALANCE (últimos {TRADES_DESDE_RESUMEN} trades)\n"
             f"----------------------------------------\n"
-            f"💰 PnL Bruto: {PNL_GLOBAL:.4f} USD\n"
-            f"💸 Comisiones estimadas: {comision_total:.4f} USD\n"
-            f"✅ PnL Neto: {pnl_neto:.4f} USD\n"
+            f"💰 PnL Neto: {PNL_GLOBAL_NETO:.4f} USD\n"
             f"🏆 Trades ganados: {TRADES_WIN}\n"
             f"❌ Trades perdidos: {TRADES_LOSS}\n"
-            f"🎯 Win Rate: {win_rate:.1f}%"
+            f"🎯 Win Rate: {win_rate:.1f}%\n"
+            f"💵 Saldo actual: {SALDO_SIMULADO:.2f} USD\n"
+            f"📉 Drawdown máximo: {drawdown:.2f} USD"
         )
+        if PAPER_TRADING:
+            mensaje += f"\n📌 Modo SIMULACIÓN (saldo inicial: {SALDO_INICIAL:.2f} USD)"
         telegram_mensaje(mensaje)
         logger.info(mensaje)
 
+        # Resetear contadores para el próximo resumen
         TRADES_DESDE_RESUMEN = 0
         PNL_GLOBAL = 0.0
+        PNL_GLOBAL_NETO = 0.0
         TRADES_WIN = 0
         TRADES_LOSS = 0
 
 def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_fuente, sent_label, sent_score):
-    global ACTIVE_TRADES, TRADES_DESDE_RESUMEN
+    global ACTIVE_TRADES, TRADES_DESDE_RESUMEN, SALDO_SIMULADO
 
-    posiciones_api = obtener_posiciones_abiertas()
-    pos_map = {}
-    for p in posiciones_api:
-        side = p.get('side', '').lower()
-        if float(p.get('size', 0)) != 0:
-            pos_map[side] = p
+    # Si es modo real, obtener posiciones de API
+    if not PAPER_TRADING:
+        posiciones_api = obtener_posiciones_abiertas()
+        pos_map = {}
+        for p in posiciones_api:
+            side = p.get('side', '').lower()
+            if float(p.get('size', 0)) != 0:
+                pos_map[side] = p
+    else:
+        pos_map = {}  # No usado en simulación
 
     trades_a_remover = []
 
@@ -1305,42 +1289,197 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
         atr = trade['estado_entrada']['atr']
         trailing_active = trade.get('trailing_active', False)
         trailing_offset = trade.get('trailing_offset', TRAILING_OFFSET_ATR)
+        es_ruptura = trade.get('es_ruptura', False)
 
-        pos_api = pos_map.get(side.lower())
-        size_actual = float(pos_api.get('size', 0)) if pos_api else 0.0
+        # En modo real, verificar tamaño real
+        if not PAPER_TRADING:
+            pos_api = pos_map.get(side.lower())
+            size_actual = float(pos_api.get('size', 0)) if pos_api else 0.0
+        else:
+            # En simulación, usamos el qty_remaining y actualizamos según condiciones
+            size_actual = qty_remaining  # inicialmente igual
 
+        # Si la posición se cerró (real o simulada)
         if size_actual == 0:
-            if qty_remaining > 0:
-                if status == 'ACTIVE':
-                    motivo, icono = "🔴 Stop Loss Original", "🔴"
-                elif status == 'TP1_HIT':
-                    motivo, icono = "🟡 Stop Loss BreakEven", "🟡"
-                elif status == 'TRAILING':
-                    motivo, icono = "🟢 Trailing Stop Loss", "🟢"
+            # Determinar motivo de cierre (para simulación, ya se manejó en la lógica de abajo)
+            # En real, si se cerró por SL o TP1, ya lo manejamos con las órdenes.
+            # Aquí solo limpiamos si ya no hay posición
+            trades_a_remover.append(idx)
+            continue
+
+        # ========== TRAILING TEMPRANO ==========
+        if status == 'ACTIVE' and not trailing_active:
+            if side == 'Buy':
+                profit_atr = (precio_actual - entry) / atr
+            else:
+                profit_atr = (entry - precio_actual) / atr
+
+            umbral_activacion = 0.5 if es_ruptura else 1.0
+            if profit_atr >= umbral_activacion:
+                if side == 'Buy':
+                    nuevo_sl = entry + 0.3 * atr if es_ruptura else entry + 0.5 * atr
                 else:
-                    motivo, icono = "⚪ Cierre Desconocido", "⚪"
+                    nuevo_sl = entry - 0.3 * atr if es_ruptura else entry - 0.5 * atr
 
-                exit_price = sl_price
-                pnl = (exit_price - entry) * qty_remaining if side == 'Buy' else (entry - exit_price) * qty_remaining
-                actualizar_estadisticas(pnl)
+                # Modificar SL (real o simulado)
+                if not PAPER_TRADING:
+                    try:
+                        modificar_orden_stop(order_id_sl, SYMBOL, nuevo_sl)
+                    except Exception as e:
+                        logger.error(f"Error modificando SL: {e}")
+                else:
+                    logger.info(f"📝 SIMULACIÓN: Trailing temprano activado #{trade_id}, SL -> {nuevo_sl:.2f}")
+                trade['sl_price'] = nuevo_sl
+                trade['trailing_active'] = True
+                telegram_mensaje(f"🔄 Trailing temprano activado #{trade_id} - SL movido a {nuevo_sl:.2f}")
 
+        # Trailing continuo
+        if trailing_active:
+            if side == 'Buy':
+                nuevo_sl = precio_actual - trailing_offset * atr
+                if nuevo_sl > trade['sl_price'] + MIN_TRAILING_STEP:
+                    if not PAPER_TRADING:
+                        try:
+                            modificar_orden_stop(order_id_sl, SYMBOL, nuevo_sl)
+                        except Exception as e:
+                            logger.error(f"Error modificando SL: {e}")
+                    else:
+                        logger.info(f"📝 SIMULACIÓN: Trailing SL #{trade_id} -> {nuevo_sl:.2f}")
+                    trade['sl_price'] = nuevo_sl
+            else:
+                nuevo_sl = precio_actual + trailing_offset * atr
+                if nuevo_sl < trade['sl_price'] - MIN_TRAILING_STEP:
+                    if not PAPER_TRADING:
+                        try:
+                            modificar_orden_stop(order_id_sl, SYMBOL, nuevo_sl)
+                        except Exception as e:
+                            logger.error(f"Error modificando SL: {e}")
+                    else:
+                        logger.info(f"📝 SIMULACIÓN: Trailing SL #{trade_id} -> {nuevo_sl:.2f}")
+                    trade['sl_price'] = nuevo_sl
+
+        # ========== TP1 (50%) ==========
+        if status == 'ACTIVE':
+            tp1_alcanzado = False
+            # En simulación, comprobar si el precio tocó TP1
+            if PAPER_TRADING:
+                if (side == 'Buy' and precio_actual >= tp1_price) or (side == 'Sell' and precio_actual <= tp1_price):
+                    tp1_alcanzado = True
+                    # Cerrar la mitad
+                    qty_cerrar = qty_total / 2
+                    qty_remaining = qty_total - qty_cerrar
+                    trade['qty_remaining'] = qty_remaining
+                    # Comisión de salida
+                    comision_salida = qty_cerrar * tp1_price * COMISION_TAKER
+                    pnl_parcial = (tp1_price - entry) * qty_cerrar if side == 'Buy' else (entry - tp1_price) * qty_cerrar
+                    pnl_neto_parcial = pnl_parcial - trade.get('comision_entrada', 0) - comision_salida
+                    # Actualizar saldo (solo si es simulación, pero lo haremos al final)
+                    # Para simplificar, acumulamos en estadísticas al cerrar completamente
+                    # Guardamos el PnL parcial en el trade para sumarlo después
+                    trade['pnl_parcial'] = pnl_neto_parcial
+                    logger.info(f"📝 SIMULACIÓN: TP1 alcanzado #{trade_id}, PnL parcial {pnl_neto_parcial:.2f} USD")
+                    # Cancelar SL antiguo y poner SL en BE
+                    trade['sl_price'] = entry
+                    trade['status'] = 'TP1_HIT'
+                    if not trade.get('trailing_active', False):
+                        trade['trailing_active'] = True
+                    # Mensaje de TP1
+                    mensaje = (
+                        f"🔓 CIERRE PARCIAL SIMULADO #{trade_id} - TP1 alcanzado\n"
+                        f"💰 Precio: {tp1_price:.2f}\n"
+                        f"📊 PnL Parcial: {pnl_neto_parcial:.4f} USD\n"
+                        f"🔄 SL movido a BE ({entry:.2f})\n"
+                        f"🎯 Esperando TP2 ({tp2_price:.2f})..."
+                    )
+                    telegram_mensaje(mensaje)
+                    # Gráfico de cierre parcial
+                    fig = generar_grafico_trade(
+                        df_actual, side,
+                        trade['estado_entrada']['soporte'],
+                        trade['estado_entrada']['resistencia'],
+                        trade['razones'],
+                        trade['estado_entrada'],
+                        entry,
+                        precio_salida=tp1_price,
+                        tiempo_entrada=trade['timestamp'],
+                        trade_id=trade_id,
+                        motivo_cierre="TP1 Parcial Alcanzado",
+                        noticia_titulo=noticia_titulo,
+                        sent_label=sent_label,
+                        sent_score=sent_score
+                    )
+                    if fig:
+                        telegram_grafico(fig)
+                        plt.close(fig)
+            else:
+                # Modo real: verificar tamaño real o si se ejecutó TP1
+                if size_actual <= qty_total * 0.6:
+                    tp1_alcanzado = True
+                    # ya se ejecutó, solo actualizar estado
+                    trade['qty_remaining'] = size_actual
+                    trade['status'] = 'TP1_HIT'
+                    # Mover SL a BE ya se hizo en la orden real, pero actualizamos
+                    trade['sl_price'] = entry
+                    if not trade.get('trailing_active', False):
+                        trade['trailing_active'] = True
+
+        # ========== TP2 y trailing infinito ==========
+        if status == 'TP1_HIT':
+            if PAPER_TRADING:
+                if (side == 'Buy' and precio_actual >= tp2_price) or (side == 'Sell' and precio_actual <= tp2_price):
+                    trade['status'] = 'TRAILING'
+                    telegram_mensaje(
+                        f"🚀 #TRAILING INFINITO ACTIVADO PARA #{trade_id}\n"
+                        f"📍 Precio cruzó TP2 ({tp2_price:.2f})\n"
+                        f"📈 Persiguiendo con {trailing_offset} ATR de distancia."
+                    )
+            else:
+                # En real, si el precio cruza TP2, ya se maneja con la orden de TP2? 
+                # No tenemos orden de TP2, solo trailing.
+                # Podríamos cambiar el status a TRAILING si el precio supera TP2.
+                if (side == 'Buy' and precio_actual >= tp2_price) or (side == 'Sell' and precio_actual <= tp2_price):
+                    trade['status'] = 'TRAILING'
+                    telegram_mensaje(
+                        f"🚀 #TRAILING INFINITO ACTIVADO PARA #{trade_id}\n"
+                        f"📍 Precio cruzó TP2 ({tp2_price:.2f})\n"
+                        f"📈 Persiguiendo con {trailing_offset} ATR de distancia."
+                    )
+
+        # ========== COMPROBAR SL (simulación) ==========
+        if PAPER_TRADING:
+            sl_activado = False
+            if (side == 'Buy' and precio_actual <= trade['sl_price']) or (side == 'Sell' and precio_actual >= trade['sl_price']):
+                sl_activado = True
+                # Cerrar toda la posición restante
+                qty_cerrar = trade['qty_remaining']
+                exit_price = trade['sl_price']
+                pnl = (exit_price - entry) * qty_cerrar if side == 'Buy' else (entry - exit_price) * qty_cerrar
+                comision_salida = qty_cerrar * exit_price * COMISION_TAKER
+                comision_entrada = trade.get('comision_entrada', 0)
+                pnl_neto = pnl - comision_entrada - comision_salida
+                # Sumar PnL parcial si existe
+                if 'pnl_parcial' in trade:
+                    pnl_neto += trade['pnl_parcial']
+                # Actualizar estadísticas
+                actualizar_estadisticas(pnl_neto)
+
+                motivo = "SL" if status == 'ACTIVE' else "SL después de TP1" if status == 'TP1_HIT' else "SL"
                 mensaje = (
-                    f"{icono} CIERRE FINAL #{trade_id}\n"
+                    f"🔴 CIERRE FINAL SIMULADO #{trade_id}\n"
                     f"📝 Motivo: {motivo}\n"
                     f"🎯 Entrada: {entry:.2f}\n"
                     f"🛑 Salida: {exit_price:.2f}\n"
-                    f"📊 PnL: {pnl:.4f} USD\n"
+                    f"📊 PnL Neto: {pnl_neto:.4f} USD\n"
                     f"📰 Noticia: {noticia_titulo} | Sentimiento: {sent_label} ({sent_score:.3f})"
                 )
                 telegram_mensaje(mensaje)
-
                 fig = generar_grafico_trade(
-                    df=df_actual, decision=side,
-                    soporte=trade['estado_entrada']['soporte'],
-                    resistencia=trade['estado_entrada']['resistencia'],
-                    razones=trade['razones'],
-                    estado=trade['estado_entrada'],
-                    precio_entrada=entry,
+                    df_actual, side,
+                    trade['estado_entrada']['soporte'],
+                    trade['estado_entrada']['resistencia'],
+                    trade['razones'],
+                    trade['estado_entrada'],
+                    entry,
                     precio_salida=exit_price,
                     tiempo_entrada=trade['timestamp'],
                     trade_id=trade_id,
@@ -1352,143 +1491,30 @@ def revisar_posiciones_reales(precio_actual, df_actual, noticia_titulo, noticia_
                 if fig:
                     telegram_grafico(fig)
                     plt.close(fig)
-
-                try:
-                    enviar_resumen_balance()
-                except Exception as e:
-                    logger.error(f"Error al enviar resumen: {e}")
-
-            trades_a_remover.append(idx)
-            continue
-
-        # ========== TRAILING TEMPRANO (antes de TP1) ==========
-        if status == 'ACTIVE' and not trailing_active:
-            # Calcular ganancia actual en ATR
-            if side == 'Buy':
-                profit_atr = (precio_actual - entry) / atr
-            else:
-                profit_atr = (entry - precio_actual) / atr
-            
-            # Si el precio se mueve 1.0 ATR a favor, activar trailing
-            if profit_atr >= 1.0:
-                # Mover SL a BE + offset (1.0 ATR)
-                if side == 'Buy':
-                    nuevo_sl = entry + 0.5 * atr   # SL en BE + 0.5 ATR (para asegurar algo)
-                else:
-                    nuevo_sl = entry - 0.5 * atr
-                
-                try:
-                    modificar_orden_stop(order_id_sl, SYMBOL, nuevo_sl)
-                    trade['sl_price'] = nuevo_sl
-                    trade['trailing_active'] = True
-                    logger.info(f"✅ Trailing temprano activado para #{trade_id} en {precio_actual:.2f}")
-                    telegram_mensaje(f"🔄 Trailing temprano activado #{trade_id} - SL movido a {nuevo_sl:.2f} (BE +0.5 ATR)")
-                except Exception as e:
-                    logger.error(f"Error activando trailing temprano #{trade_id}: {e}")
-        # ======================================================
-
-        # Si ya está en trailing, seguir el precio
-        if trailing_active:
-            if side == 'Buy':
-                nuevo_sl = precio_actual - trailing_offset * atr
-                if nuevo_sl > trade['sl_price'] + MIN_TRAILING_STEP:
-                    try:
-                        modificar_orden_stop(order_id_sl, SYMBOL, nuevo_sl)
-                        trade['sl_price'] = nuevo_sl
-                        logger.debug(f"#{trade_id} Trailing SL a {nuevo_sl:.2f}")
-                    except Exception as e:
-                        logger.error(f"Error modificando SL trailing: {e}")
-            else:
-                nuevo_sl = precio_actual + trailing_offset * atr
-                if nuevo_sl < trade['sl_price'] - MIN_TRAILING_STEP:
-                    try:
-                        modificar_orden_stop(order_id_sl, SYMBOL, nuevo_sl)
-                        trade['sl_price'] = nuevo_sl
-                        logger.debug(f"#{trade_id} Trailing SL a {nuevo_sl:.2f}")
-                    except Exception as e:
-                        logger.error(f"Error modificando SL trailing: {e}")
-
-        # Lógica de TP1 (50%)
-        if status == 'ACTIVE':
-            tp1_alcanzado = False
-            if size_actual <= qty_total * 0.6:
-                tp1_alcanzado = True
-            elif (side == 'Buy' and precio_actual >= tp1_price) or (side == 'Sell' and precio_actual <= tp1_price):
-                qty_cerrar = qty_total / 2
-                crear_orden_market(SYMBOL, 'Sell' if side == 'Buy' else 'Buy', qty_cerrar, reduce_only=True)
-                size_actual = qty_total - qty_cerrar
-                tp1_alcanzado = True
-
-            if tp1_alcanzado:
-                trade['qty_remaining'] = size_actual
-                pnl_parcial = (tp1_price - entry) * (qty_total - size_actual) if side == 'Buy' else (entry - tp1_price) * (qty_total - size_actual)
-
-                if order_id_sl:
-                    try:
-                        cancelar_orden(order_id_sl, SYMBOL)
-                    except:
-                        pass
-                # Mover SL a BE (entry)
-                try:
-                    new_sl_order = crear_orden_stop_market(SYMBOL, 'Sell' if side == 'Buy' else 'Buy', trade['qty_remaining'], entry, reduce_only=True)
-                    trade['order_id_sl'] = new_sl_order.get('orderId')
-                    trade['sl_price'] = entry
-                except Exception as e:
-                    logger.error(f"Error creando nuevo SL (BE): {e}")
-
-                trade['status'] = 'TP1_HIT'
-                # Activar trailing si no lo estaba ya
-                if not trade.get('trailing_active', False):
-                    trade['trailing_active'] = True
-
-                mensaje = (
-                    f"🔓 CIERRE PARCIAL #{trade_id} - TP1 alcanzado\n"
-                    f"💰 Precio: {tp1_price:.2f}\n"
-                    f"📊 PnL Parcial: {pnl_parcial:.4f} USD\n"
-                    f"🔄 SL movido a BE ({entry:.2f})\n"
-                    f"🎯 Esperando TP2 ({tp2_price:.2f})..."
-                )
-                telegram_mensaje(mensaje)
-
-                fig = generar_grafico_trade(
-                    df_actual, side,
-                    trade['estado_entrada']['soporte'],
-                    trade['estado_entrada']['resistencia'],
-                    trade['razones'],
-                    trade['estado_entrada'],
-                    entry,
-                    precio_salida=tp1_price,
-                    tiempo_entrada=trade['timestamp'],
-                    trade_id=trade_id,
-                    motivo_cierre="TP1 Parcial Alcanzado",
-                    noticia_titulo=noticia_titulo,
-                    sent_label=sent_label,
-                    sent_score=sent_score
-                )
-                if fig:
-                    telegram_grafico(fig)
-                    plt.close(fig)
+                trades_a_remover.append(idx)
                 continue
 
-        # TP2 y trailing infinito (ya implementado con trailing_active)
-        if status == 'TP1_HIT':
-            if (side == 'Buy' and precio_actual >= tp2_price) or (side == 'Sell' and precio_actual <= tp2_price):
-                trade['status'] = 'TRAILING'
-                telegram_mensaje(
-                    f"🚀 #TRAILING INFINITO ACTIVADO PARA #{trade_id}\n"
-                    f"📍 Precio cruzó TP2 ({tp2_price:.2f})\n"
-                    f"📈 Persiguiendo con {trailing_offset} ATR de distancia."
-                )
-                # Ya trailing_active está en True, seguirá actualizando SL
+        # ========== CIERRE POR TP2 (simulación) o trailing infinito ==========
+        if PAPER_TRADING and status == 'TRAILING':
+            # Si el precio cruza el SL (ya manejado arriba), se cierra.
+            # Si el precio sigue subiendo/bajando, el trailing lo sigue.
+            # No hay cierre automático por TP2, solo trailing.
+            pass
 
+    # Remover trades cerrados (tanto reales como simulados)
     for idx in sorted(trades_a_remover, reverse=True):
         del ACTIVE_TRADES[idx]
 
+    # En modo real, también sincronizar con API (ya lo hacemos al inicio del loop)
+    if not PAPER_TRADING:
+        # Opcional: limpiar trades que ya no existen en API
+        pass
+
 # ============================================================
-# LOOP PRINCIPAL (sin cambios)
+# LOOP PRINCIPAL
 # ============================================================
 def run_bot():
-    global TRADE_COUNTER, ACTIVE_TRADES
+    global TRADE_COUNTER, ACTIVE_TRADES, SALDO_SIMULADO
 
     try:
         set_leverage(SYMBOL, LEVERAGE)
@@ -1496,23 +1522,18 @@ def run_bot():
         logger.error(f"Error al establecer apalancamiento: {e}")
         telegram_mensaje(f"⚠️ Error apalancamiento: {e}")
 
-    try:
-        pos_abiertas = obtener_posiciones_abiertas()
-        if len(pos_abiertas) == 0:
-            if len(ACTIVE_TRADES) > 0:
-                logger.warning("⚠️ No hay posiciones en API pero ACTIVE_TRADES contiene trades. Limpiando...")
-                ACTIVE_TRADES = []
-        else:
-            logger.info(f"📊 Posiciones abiertas en API: {len(pos_abiertas)}")
-    except Exception as e:
-        logger.error(f"Error en sincronización inicial: {e}")
+    if PAPER_TRADING:
+        telegram_mensaje(f"🧪 MODO PAPER TRADING ACTIVADO - Saldo inicial: {SALDO_INICIAL:.2f} USD")
+    else:
+        telegram_mensaje("⚡ MODO REAL ACTIVADO - ¡Cuidado!")
 
-    telegram_mensaje("🤖 BOT V91.7 INICIADO (con SL 2.0 ATR, R/R 2.0, trailing temprano)\n"
+    telegram_mensaje("🤖 BOT V92.0-PAPER INICIADO (Zonas S/R, Rupturas prioritarias)\n"
                      f"📊 Velas: {INTERVAL}m | Máx. posiciones: {MAX_OPEN_TRADES}\n"
                      f"⚡ Leverage: {LEVERAGE}x | Tamaño: {QTY_BTC} BTC\n"
-                     f"🔒 SL = {SL_MULTIPLIER} ATR | TP1 50% | Trailing desde +1 ATR\n"
+                     f"🔒 SL adaptativo (ruptura 1.2 ATR, rebote 1.8 ATR)\n"
+                     f"📈 Trailing temprano y gestión moderna\n"
                      f"📰 Filtro fundamental activo\n"
-                     f"🛑 Filtros: tendencia con confluencia, distancia >2.5 ATR, R/R >= {MIN_RR_RATIO}")
+                     f"🛑 Filtros: confluencia 1/3, distancia <=3.0 ATR, R/R >= {MIN_RR_RATIO}")
 
     ultima_fecha = None
 
@@ -1534,7 +1555,7 @@ def run_bot():
 
             titulo, fuente, sent_label, sent_score = obtener_noticias_y_sentimiento()
 
-            decision, soporte, resistencia, razones = motor_v90(estado, df)
+            decision, soporte, resistencia, razones = motor_v92(estado, df)
 
             filtro_ok = True
             motivo_filtro = "Sin filtro"
@@ -1547,7 +1568,8 @@ def run_bot():
             logger.info("="*100)
             logger.info(f"🕒 {estado['fecha']} | 💰 BTC: {estado['precio']:.2f}")
             logger.info(f"📐 Tendencia: {estado['tendencia']} | Slope: {estado['slope']:.5f}")
-            logger.info(f"🧱 Soporte: {soporte:.2f} | Resistencia: {resistencia:.2f}")
+            logger.info(f"🧱 Zona Soporte: {estado.get('zona_soporte', (soporte, soporte))[0]:.2f}-{estado.get('zona_soporte', (soporte, soporte))[1]:.2f}")
+            logger.info(f"🧱 Zona Resistencia: {estado.get('zona_resistencia', (resistencia, resistencia))[0]:.2f}-{estado.get('zona_resistencia', (resistencia, resistencia))[1]:.2f}")
             logger.info(f"📊 ATR: {estado['atr']:.2f} | EMA20: {estado['ema20']:.2f}")
             logger.info(f"📏 Patrón: {estado['patron']}")
             logger.info(f"📏 Distancia a EMA20 (ATR): {estado['dist_ema_atr']:.2f}")
@@ -1555,12 +1577,14 @@ def run_bot():
             logger.info(f"🧠 Razones: {', '.join(razones)}")
             logger.info(f"🔒 Filtro fundamental: {'PERMITIDO' if filtro_ok else 'BLOQUEADO'} - {motivo_filtro}")
             logger.info(f"📊 Posiciones abiertas (memoria): {num_abiertas}/{MAX_OPEN_TRADES}")
-            try:
-                api_pos = obtener_posiciones_abiertas()
-                logger.info(f"📊 Posiciones abiertas (API): {len(api_pos)}")
-            except:
-                pass
+            if not PAPER_TRADING:
+                try:
+                    api_pos = obtener_posiciones_abiertas()
+                    logger.info(f"📊 Posiciones abiertas (API): {len(api_pos)}")
+                except:
+                    pass
             logger.info(f"📰 Noticia: {titulo} (Fuente: {fuente}) | Sentimiento: {sent_label} ({sent_score:.3f})")
+            logger.info(f"💵 Saldo simulado: {SALDO_SIMULADO:.2f} USD" if PAPER_TRADING else "")
             logger.info("="*100)
 
             if decision and num_abiertas < MAX_OPEN_TRADES:
